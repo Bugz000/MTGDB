@@ -1,6 +1,6 @@
 # MTGDB
 
-> **A single-file, self-healing, self-sustaining Magic: The Gathering card database, price-history cache, and image proxy.** Designed to be run once and forgotten: `node server.js` populates itself, keeps itself in sync, and repairs itself indefinitely across crashes, power outages, corrupt downloads, or partial writes.
+> **A single-file, self-healing, self-sustaining Magic: The Gathering card database, price-history cache, and image cache + proxy.** Designed to be run once and forgotten: `node server.js` populates itself, keeps itself in sync, and repairs itself indefinitely across crashes, power outages, corrupt downloads, partial writes and updates.
 
 ---
 
