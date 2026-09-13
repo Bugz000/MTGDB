@@ -19,6 +19,15 @@ As of uploading the repository - it IS WORKING, though specific api endpoints an
 feel free to fork this project, do what you want with it, i dont care
 though centralisation and collaboration into a single effort would be beneficial, in my opinion
 
+There is a TUI that shows some stats, a functional webUI akin to scryfalls own to serve primary as a data inspector and a quick lookup tool, and ofcourse, an API accessible over http get/post requests, 
+
+> UPCOMING features
+- full scryfall style searching (Extended beyond scryfall's own search)
+- per-field indexing, so you can either dump all card info, or target a VERY specific field for faster lookups, though it should be instant in all cases
+- user tables, so you can import manabox lists, scryfall lists, the rest, you can have a WANTED list, a HAVEs list, whatever you need, infinite decks, whole collection, whatever; the database will store it all 
+- further afield? TBD ~ ~ 
+
+i will let AI continue from here;
 
 ## 🌟 Overview & Philosophy
 
