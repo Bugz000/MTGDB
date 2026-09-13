@@ -4,9 +4,25 @@
 
 ---
 
+## Real Talk
+Yes this is AI slop, i am putting very little actual effort into it - though it is formed by merging 3 seperate projects i was making by hand - as they all solved basically the same thing
+I do not collaborate well, so collaborating with an AI is a solution for me, because i'm just one guy - i can't make the whole world, and databases are one of my weakest fields in computing
+HOWEVER this does not mean you cannot contribute, i welcome all contributions, just know i am well aware this is AI, there is many things wrong with it, use at your own risk, don't expect miracles, blahblah honestly if i have to explain this much to you, this project isn't for you :)
+i WILL however be slowly migrating this to a hand maintained copy in good time - once all my desired core features are in place, i only put it on github once i have been running it myself for a few days and it's been working quite well 
+
+lots of things to fix, lots of things to implement, but at least things can be tracked here
+
+the core principle is one file, one command to boot, and you have yourself a home hosted MTG api - can't get easier than this 
+Ease of use is my number one policy.
+
+As of uploading the repository - it IS WORKING, though specific api endpoints and usage may change over time 
+feel free to fork this project, do what you want with it, i dont care
+though centralisation and collaboration into a single effort would be beneficial, in my opinion
+
+
 ## 🌟 Overview & Philosophy
 
-Managing local Magic: The Gathering data historically requires brittle scripts, multi-service docker-compose stacks, or manual database management. **MTG Oracle Daemon** condenses an entire MTG data infrastructure into a single, zero-dependency Node.js file backed by SQLite, featuring:
+Managing local Magic: The Gathering data historically requires brittle scripts, multi-service docker-compose stacks, or manual database management. **MTGDB** condenses an entire MTG data infrastructure into a single, zero-dependency Node.js file backed by SQLite, featuring:
 - **Zero-Touch Resilience:** A bulletproof supervisor/worker split that automatically detects hangs or crashes and restarts with exponential backoff.
 - **Atomic Pipelines:** Every download uses `.part` temporary files, content-length checks, and SHA256 verification before atomic renaming.
 - **Hot Snapshots & Cascading Rollbacks:** All bulk mutations are guarded by an async mutex and snapshot ring. If anything fails, it automatically rolls back or cascades through historical backups.
@@ -20,7 +36,7 @@ Managing local Magic: The Gathering data historically requires brittle scripts, 
 
 [![MTGDB Demo Preview](https://i.postimg.cc/wjtmT7Yb/demo.png)](https://youtu.be/Hc5C4GahXds)
 
-> 🎥 **[Watch the full video walkthrough on YouTube](https://youtu.be/Hc5C4GahXds)**
+> 🎥 **[Watch it in Action](https://youtu.be/Hc5C4GahXds)**
 
 
 ---
