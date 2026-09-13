@@ -53,6 +53,24 @@
  *    blip failures without waiting a full 24h for the next cycle.
  *
  *  STILL OUTSTANDING / NOT DONE (priority order set by the user):
+ *  - [DONE] Disk space budget worker (Section 8B): total footprint capped
+ *    at DISK_BUDGET_TOTAL_BYTES (env DISK_BUDGET_GB, default 8GB), split
+ *    DISK_BUDGET_CACHE_PERCENT (env, default 40%) to the image cache and
+ *    the rest to MTGJSON/ManaPool/Scryfall archives + DB snapshots
+ *    combined. Runs on its own DISK_AUDIT_INTERVAL_MS loop (default 5m).
+ *    Archive pool culls strictly oldest-first (snapshot files and dated
+ *    backup folders mixed into one age-sorted list), always keeping at
+ *    least the single newest snapshot and the single newest dated folder
+ *    per source so self-healing/rehydration never loses its last resort.
+ *    Image cache pool culls by USAGE, not age — see next item.
+ *  - [DONE] Usage-weighted image cache eviction: image_cache gained
+ *    hit_count/last_hit_at, incremented only when an image is actually
+ *    served to a live request (recordImageHit — never on opportunistic
+ *    background preload, so a never-viewed preloaded image stays at 0 and
+ *    is first to go). The disk budget worker culls lowest hit_count first,
+ *    oldest last_hit_at as tiebreaker, regardless of how recently a file
+ *    landed on disk — a popular old image survives over an unpopular new
+ *    one.
  *  - [TOP PRIORITY, IN PROGRESS] Full Scryfall grammar coverage. This pass
  *    added: !exact-name matching, real m:/mana: symbol-multiset matching
  *    (via a registered MANA_MATCH SQL function, replacing a naive exact-
@@ -343,6 +361,7 @@ function sendToSupervisor(msg) {
 // SECTION 1: CONFIGURATION
 // ============================================================================
 const PORT = process.env.PORT || 3000;
+const DISK_BUDGET_GB = process.env.DISK_BUDGET_GB || 50;
 const ROOT_DIR = __dirname;
 const CACHE_DIR = path.join(ROOT_DIR, 'cache');
 const IMG_CACHE_DIR = path.join(CACHE_DIR, 'images');
@@ -393,6 +412,25 @@ const SEARCH_PAGE_SIZE = 175;                      // matches Scryfall's own pag
 const DEFAULT_OP_TIMEOUT_MS = 2 * 60 * 60 * 1000;  // 2h ceiling on any single guarded pipeline run
 const BOOT_REHYDRATE_TIMEOUT_MS = 20 * 60 * 1000;  // 20m ceiling on boot-time backup rehydration
 
+// ----------------------------------------------------------------------------
+// DISK SPACE BUDGET
+// ----------------------------------------------------------------------------
+// The daemon self-limits its total on-disk footprint to a configurable byte
+// budget, split between the image cache and everything else that accumulates
+// over time (MTGJSON/ManaPool/Scryfall raw archives + DB snapshots). Both
+// env vars are overridable; defaults match "8GB total, 40% of that to
+// images" as specified. Neither budget includes cards.db itself or the tmp
+// dir — those aren't cullable accumulation, they're the live working set.
+const DISK_BUDGET_TOTAL_BYTES = Math.round((parseFloat(DISK_BUDGET_GB) || 8) * 1024 * 1024 * 1024);
+const DISK_BUDGET_CACHE_PERCENT = Math.min(1, Math.max(0, parseFloat(process.env.DISK_BUDGET_CACHE_PERCENT) || 0.80));
+const DISK_BUDGET_CACHE_BYTES = Math.floor(DISK_BUDGET_TOTAL_BYTES * DISK_BUDGET_CACHE_PERCENT);
+const DISK_BUDGET_ARCHIVE_BYTES = DISK_BUDGET_TOTAL_BYTES - DISK_BUDGET_CACHE_BYTES; // MTGJSON+ManaPool+Scryfall archives + snapshots, combined
+const DISK_AUDIT_INTERVAL_MS = 5 * 60 * 1000;      // check every 5 minutes
+// Cull down to 92% of budget rather than exactly 100%, so a handful of new
+// files landing right after an audit doesn't immediately trip the next one —
+// plain hysteresis to avoid thrashing right at the edge of the budget.
+const DISK_AUDIT_TARGET_FRACTION = 0.92;
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // ============================================================================
@@ -436,6 +474,15 @@ const stats = {
     dbLockQueueDepth: 0,
     dbLockActive: 'None',
     restartNotice: null,
+    diskCacheBytesUsed: 0,
+    diskCacheBudgetBytes: DISK_BUDGET_CACHE_BYTES,
+    diskArchiveBytesUsed: 0,
+    diskArchiveBudgetBytes: DISK_BUDGET_ARCHIVE_BYTES,
+    diskAuditStatus: 'Pending',
+    lastDiskAuditAt: null,
+    imagesCulledForSpace: 0,
+    archiveItemsCulledForSpace: 0,
+    bytesFreedForSpace: 0,
 };
 
 let reqsThisSecond = 0;
@@ -738,7 +785,7 @@ const footerBox = blessed.box({
     top: '92%', left: leftColWidth, width: rightColWidth, height: '8%',
     tags: true, border: { type: 'line' },
     style: { border: { fg: 'grey' }, text: { fg: 'grey' } },
-    content: ' {bold}[q/C-c]{/bold} quit  {bold}[s]{/bold} Scryfall resync  {bold}[r]{/bold} MTGJSON resync  {bold}[m]{/bold} ManaPool resync  {bold}[h]{/bold} self-heal  {bold}[e]{/bold} enrich now  {bold}[b]{/bold} restore snapshot',
+    content: ' {bold}[q/C-c]{/bold} quit  {bold}[s]{/bold} Scryfall resync  {bold}[r]{/bold} MTGJSON resync  {bold}[m]{/bold} ManaPool resync  {bold}[h]{/bold} self-heal  {bold}[e]{/bold} enrich now  {bold}[b]{/bold} restore snapshot  {bold}[d]{/bold} disk audit',
 });
 
 screen.append(statsBox);
@@ -763,6 +810,7 @@ screen.key(['b', 'B'], () => {
         .then((restored) => { if (restored) initDatabase(); else vLog('RESTORE_ERR', 'No usable snapshot was available.'); })
         .catch((e) => vLog('RESTORE_ERR', e.message));
 });
+screen.key(['d', 'D'], () => { vLog('SYSTEM', 'Manual disk space audit triggered from TUI.'); runDiskSpaceAudit().catch((e) => vLog('DISK_AUDIT_ERR', e.message)); });
 
 const manapoolForceFlag = { force: false };
 const enrichmentForceFlag = { force: false };
@@ -832,6 +880,8 @@ function updateUI() {
         ` Self-Audit:    {green-fg}${stats.lastAuditStatus}{/green-fg} {grey-fg}(${lastAudit}){/grey-fg}\n` +
         ` Snapshots:     {cyan-fg}${stats.snapshotsTaken}{/cyan-fg}  Rollbacks: {red-fg}${stats.rollbacksPerformed}{/red-fg}  Heals: {yellow-fg}${stats.healActionsTaken}{/yellow-fg}\n` +
         ` Backup-Patched:{cyan-fg}${stats.patchedFromBackup}{/cyan-fg}\n` +
+        ` Disk (cache):  {cyan-fg}${formatBytes(stats.diskCacheBytesUsed)}{/cyan-fg} / {yellow-fg}${formatBytes(stats.diskCacheBudgetBytes)}{/yellow-fg}\n` +
+        ` Disk (archive):{cyan-fg}${formatBytes(stats.diskArchiveBytesUsed)}{/cyan-fg} / {yellow-fg}${formatBytes(stats.diskArchiveBudgetBytes)}{/yellow-fg}  {grey-fg}(${stats.diskAuditStatus}){/grey-fg}\n` +
         ` {bold}SOURCES{/bold}\n` +
         ` MTGJSON:       {yellow-fg}${stats.mtgjsonState}{/yellow-fg} {grey-fg}(${lastMtg}){/grey-fg}\n` +
         ` ManaPool:      {yellow-fg}${stats.manapoolState}{/yellow-fg} {grey-fg}(${lastMp}){/grey-fg}\n` +
@@ -1164,6 +1214,8 @@ function initDatabase(attempt = 0) {
                 bytes           INTEGER,
                 sha256          TEXT,
                 cached_at       INTEGER,
+                hit_count       INTEGER NOT NULL DEFAULT 0,
+                last_hit_at     INTEGER,
                 PRIMARY KEY (scryfall_id, type, face)
             );
 
@@ -1270,6 +1322,23 @@ function initDatabase(attempt = 0) {
                 `);
             }
         } catch (e) { vLog('DB_MIGRATE_ERR', `Could not migrate image_cache to include face: ${e.message}`); }
+
+        // Migration: image_cache gains hit_count/last_hit_at for
+        // usage-weighted eviction (see Section on disk-budget culling) —
+        // added as plain nullable/defaulted columns, no table rebuild
+        // needed since neither is part of the primary key.
+        try {
+            const imgCols2 = db.prepare("PRAGMA table_info(image_cache)").all().map((c) => c.name);
+            if (!imgCols2.includes('hit_count')) {
+                vLog('DB_MIGRATE', 'Adding missing column image_cache.hit_count...');
+                db.exec(`ALTER TABLE image_cache ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0`);
+            }
+            if (!imgCols2.includes('last_hit_at')) {
+                vLog('DB_MIGRATE', 'Adding missing column image_cache.last_hit_at...');
+                db.exec(`ALTER TABLE image_cache ADD COLUMN last_hit_at INTEGER`);
+            }
+            db.exec(`CREATE INDEX IF NOT EXISTS idx_image_cache_hits ON image_cache(hit_count, last_hit_at)`);
+        } catch (e) { vLog('DB_MIGRATE_ERR', `Could not migrate image_cache to include hit tracking: ${e.message}`); }
 
         // FTS5 full-text index over the fields Scryfall search treats as
         // "text" targets. External-content table keyed off cards' implicit
@@ -1708,6 +1777,219 @@ async function runSelfAudit() {
     } finally {
         isHealing = false;
         updateCounts();
+    }
+}
+
+// ============================================================================
+// SECTION 8B: DISK SPACE BUDGET AUDIT
+// ============================================================================
+// Keeps the daemon's total on-disk footprint under DISK_BUDGET_TOTAL_BYTES,
+// split into two independently-tracked pools:
+//   - "cache": the image cache (IMG_CACHE_DIR). Culled by USAGE, not just
+//     age — least-hit images go first, so a popular card's art survives
+//     even if it's old, while a one-off preload nobody ever actually
+//     looked at gets reclaimed first regardless of how recently it landed.
+//   - "archive": MTGJSON/ManaPool/Scryfall raw backup archives + DB
+//     snapshots, combined into one pool and culled strictly oldest-first,
+//     since there's no "usage" concept for a backup file.
+// Neither pool ever goes below what's needed to keep the daemon
+// self-healing: the single newest DB snapshot and the single
+// most-recently-dated archive folder per source are never culled, no
+// matter how far over budget the rest of the pool is — losing the very
+// last restore point or the very last local rehydration source in the
+// name of hitting a byte target would defeat the whole point of having
+// them.
+async function computeDirTotalBytesRecursive(dir) {
+    let total = 0;
+    let entries;
+    try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch (e) { return 0; }
+    for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        try {
+            if (entry.isDirectory()) total += await computeDirTotalBytesRecursive(full);
+            else total += (await fs.stat(full)).size;
+        } catch (e) { /* vanished mid-scan (concurrent write/cull) — skip, not fatal */ }
+    }
+    return total;
+}
+
+/**
+ * Culls least-used, then least-recently-used, cached images until the
+ * image cache pool is back under budget. Usage comes straight from
+ * image_cache.hit_count/last_hit_at (see recordImageHit) — a row that's
+ * never been hit (hit_count = 0, last_hit_at NULL) sorts first no matter
+ * how new it is, ahead of even a very old but frequently-viewed image.
+ */
+async function auditImageCacheBudget() {
+    if (!db) return { culled: 0, freedBytes: 0 };
+    let totalBytes = 0;
+    try {
+        totalBytes = db.prepare('SELECT COALESCE(SUM(bytes), 0) AS total FROM image_cache').get().total;
+    } catch (e) {
+        vLog('DISK_AUDIT_ERR', `Could not compute image cache size: ${e.message}`);
+        return { culled: 0, freedBytes: 0 };
+    }
+    stats.diskCacheBytesUsed = totalBytes;
+    if (totalBytes <= DISK_BUDGET_CACHE_BYTES) return { culled: 0, freedBytes: 0 };
+
+    const targetBytes = Math.floor(DISK_BUDGET_CACHE_BYTES * DISK_AUDIT_TARGET_FRACTION);
+    const toFree = totalBytes - targetBytes;
+    vLog('DISK_AUDIT', `Image cache (${formatBytes(totalBytes)}) is over budget (${formatBytes(DISK_BUDGET_CACHE_BYTES)}). Culling least-used images to free ~${formatBytes(toFree)}...`);
+
+    let candidates = [];
+    try {
+        candidates = db.prepare(`
+            SELECT scryfall_id, type, face, rel_path, bytes, hit_count, last_hit_at, cached_at
+            FROM image_cache
+            ORDER BY hit_count ASC, COALESCE(last_hit_at, cached_at, 0) ASC, cached_at ASC
+        `).all();
+    } catch (e) {
+        vLog('DISK_AUDIT_ERR', `Could not enumerate image cache candidates: ${e.message}`);
+        return { culled: 0, freedBytes: 0 };
+    }
+
+    let culled = 0, freed = 0;
+    await withWriteLock(async () => {
+        const delStmt = db.prepare('DELETE FROM image_cache WHERE scryfall_id = ? AND type = ? AND face = ?');
+        for (const row of candidates) {
+            if (freed >= toFree) break;
+            try {
+                if (row.rel_path) {
+                    const full = path.join(IMG_CACHE_DIR, row.rel_path);
+                    try { fsSync.unlinkSync(full); } catch (e) { /* already gone — fine, we're deleting it either way */ }
+                }
+                delStmt.run(row.scryfall_id, row.type, row.face);
+                freed += (row.bytes || 0);
+                culled++;
+            } catch (e) {
+                vLog('DISK_AUDIT_ERR', `Failed to cull cached image ${row.scryfall_id}/${row.type}/${row.face}: ${e.message}`);
+            }
+        }
+    });
+
+    stats.diskCacheBytesUsed = Math.max(0, totalBytes - freed);
+    if (culled > 0) vLog('DISK_AUDIT', `Culled ${culled} least-used cached image(s), freeing ${formatBytes(freed)}.`);
+    return { culled, freedBytes: freed };
+}
+
+/** Gathers every cullable archive unit (individual snapshot files, whole
+ * dated backup-source folders) with age + size, always excluding the
+ * single newest of each so at least one restore point / rehydration
+ * source per source always survives regardless of budget pressure. */
+async function collectArchiveCullCandidates() {
+    const candidates = [];
+
+    try {
+        const files = await fs.readdir(BACKUP_SNAPSHOT_DIR);
+        const snapFiles = [];
+        for (const f of files) {
+            if (!f.endsWith('.db.bak')) continue;
+            const full = path.join(BACKUP_SNAPSHOT_DIR, f);
+            try {
+                const st = await fs.stat(full);
+                snapFiles.push({ kind: 'snapshot', label: f, path: full, mtimeMs: st.mtimeMs, bytes: st.size });
+            } catch (e) { /* vanished mid-scan */ }
+        }
+        snapFiles.sort((a, b) => b.mtimeMs - a.mtimeMs); // newest first
+        for (let i = 1; i < snapFiles.length; i++) candidates.push(snapFiles[i]); // never cull index 0 (the newest)
+    } catch (e) { /* snapshot dir may not exist yet */ }
+
+    for (const sourceDir of [BACKUP_MTGJSON_DIR, BACKUP_MANAPOOL_DIR, BACKUP_SCRYFALL_DIR]) {
+        try {
+            const dayNames = (await fs.readdir(sourceDir)).sort().reverse(); // newest date-string first
+            for (let i = 1; i < dayNames.length; i++) { // never cull index 0 (the most recent dated folder)
+                const dayName = dayNames[i];
+                const full = path.join(sourceDir, dayName);
+                let st;
+                try { st = await fs.stat(full); } catch (e) { continue; }
+                if (!st.isDirectory()) continue;
+                const dirBytes = await computeDirTotalBytesRecursive(full);
+                candidates.push({ kind: 'archive_day', label: `${path.basename(sourceDir)}/${dayName}`, path: full, mtimeMs: st.mtimeMs, bytes: dirBytes });
+            }
+        } catch (e) { /* source dir may not exist yet */ }
+    }
+
+    return candidates;
+}
+
+async function computeArchiveTotalBytes() {
+    let total = 0;
+    for (const dir of [BACKUP_MTGJSON_DIR, BACKUP_MANAPOOL_DIR, BACKUP_SCRYFALL_DIR, BACKUP_SNAPSHOT_DIR]) {
+        total += await computeDirTotalBytesRecursive(dir);
+    }
+    return total;
+}
+
+async function auditArchiveBudget() {
+    let totalBytes = 0;
+    try {
+        totalBytes = await computeArchiveTotalBytes();
+    } catch (e) {
+        vLog('DISK_AUDIT_ERR', `Could not compute archive size: ${e.message}`);
+        return { culled: 0, freedBytes: 0 };
+    }
+    stats.diskArchiveBytesUsed = totalBytes;
+    if (totalBytes <= DISK_BUDGET_ARCHIVE_BYTES) return { culled: 0, freedBytes: 0 };
+
+    const targetBytes = Math.floor(DISK_BUDGET_ARCHIVE_BYTES * DISK_AUDIT_TARGET_FRACTION);
+    const toFree = totalBytes - targetBytes;
+    vLog('DISK_AUDIT', `Backup/snapshot archive (${formatBytes(totalBytes)}) is over budget (${formatBytes(DISK_BUDGET_ARCHIVE_BYTES)}). Culling oldest first to free ~${formatBytes(toFree)}...`);
+
+    const candidates = await collectArchiveCullCandidates();
+    candidates.sort((a, b) => a.mtimeMs - b.mtimeMs); // oldest first, snapshots and archive-day folders mixed together
+
+    let culled = 0, freed = 0;
+    for (const c of candidates) {
+        if (freed >= toFree) break;
+        try {
+            if (c.kind === 'snapshot') await fs.unlink(c.path);
+            else await fs.rm(c.path, { recursive: true, force: true });
+            freed += c.bytes;
+            culled++;
+            vLog('DISK_AUDIT', `Culled ${c.kind === 'snapshot' ? 'snapshot' : 'archive day'} ${c.label} (${formatBytes(c.bytes)}).`);
+        } catch (e) {
+            vLog('DISK_AUDIT_ERR', `Failed to cull ${c.label}: ${e.message}`);
+        }
+    }
+
+    stats.diskArchiveBytesUsed = Math.max(0, totalBytes - freed);
+    return { culled, freedBytes: freed };
+}
+
+let isDiskAuditing = false;
+async function runDiskSpaceAudit() {
+    if (isDiskAuditing) { vLog('DISK_AUDIT', 'Disk space audit already in progress; skipping overlapping run.'); return; }
+    isDiskAuditing = true;
+    try {
+        const cacheResult = await auditImageCacheBudget();
+        const archiveResult = await auditArchiveBudget();
+        const totalCulled = cacheResult.culled + archiveResult.culled;
+        const totalFreed = cacheResult.freedBytes + archiveResult.freedBytes;
+
+        stats.imagesCulledForSpace += cacheResult.culled;
+        stats.archiveItemsCulledForSpace += archiveResult.culled;
+        stats.bytesFreedForSpace += totalFreed;
+        stats.lastDiskAuditAt = Date.now();
+        stats.diskAuditStatus = totalCulled > 0 ? `Culled ${totalCulled} item(s), freed ${formatBytes(totalFreed)}` : 'Within budget';
+
+        if (totalCulled > 0) {
+            auditLog('INFO', 'DISK_AUDIT_SUCCESS', `Disk space audit culled ${cacheResult.culled} image(s) and ${archiveResult.culled} archive item(s), freeing ${formatBytes(totalFreed)} total.`);
+            updateCounts();
+        }
+    } catch (err) {
+        stats.diskAuditStatus = `Error: ${err.message}`;
+        auditLog('ERROR', 'DISK_AUDIT_ERR', `Disk space audit failed: ${err.message}`);
+    } finally {
+        isDiskAuditing = false;
+        updateUI();
+    }
+}
+
+async function startDiskAuditWorker() {
+    vLog('DISK_AUDIT_WORKER', `Disk space budget worker initialized (total ${formatBytes(DISK_BUDGET_TOTAL_BYTES)}: ${formatBytes(DISK_BUDGET_CACHE_BYTES)} cache / ${formatBytes(DISK_BUDGET_ARCHIVE_BYTES)} archive).`);
+    while (!shuttingDown) {
+        try { await runDiskSpaceAudit(); } catch (e) { vLog('DISK_AUDIT_ERR', `Worker iteration failed: ${e.message}`); }
+        await sleep(DISK_AUDIT_INTERVAL_MS);
     }
 }
 
@@ -3238,6 +3520,54 @@ const IMAGE_TYPES = ['small', 'normal', 'large', 'png', 'art_crop', 'border_crop
 const DFC_LAYOUTS = new Set(['transform', 'modal_dfc', 'double_faced_token', 'reversible_card']);
 function isDoubleFacedLayout(layout) { return DFC_LAYOUTS.has(layout); }
 
+/**
+ * Single shared "generic card back" image, served for the `face=back`
+ * request on any card whose layout isn't genuinely double-faced. Generated
+ * once (a plain SVG, so there's no dependency on a real Scryfall asset URL
+ * that might not exist or might change), cached to disk, and reused for
+ * every single-faced card — there is never a per-card network fetch for
+ * this, since a non-double-faced card's "back" is always the same generic
+ * image by definition.
+ */
+const GENERIC_CARD_BACK_PATH = path.join(IMG_CACHE_DIR, '_generic_card_back.svg');
+function ensureGenericCardBack() {
+    if (fsSync.existsSync(GENERIC_CARD_BACK_PATH)) return;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="488" height="680" viewBox="0 0 488 680">
+        <rect width="488" height="680" rx="24" fill="#1a1a2e"/>
+        <rect x="14" y="14" width="460" height="652" rx="18" fill="#0f0f1a" stroke="#c9a86a" stroke-width="4"/>
+        <circle cx="244" cy="340" r="150" fill="none" stroke="#c9a86a" stroke-width="6"/>
+        <circle cx="244" cy="340" r="110" fill="none" stroke="#c9a86a" stroke-width="3"/>
+        <text x="244" y="354" font-family="Georgia, serif" font-size="44" fill="#c9a86a" text-anchor="middle" font-weight="bold">MTG</text>
+        <text x="244" y="640" font-family="Georgia, serif" font-size="15" fill="#6a6a7a" text-anchor="middle">No back face — single-faced card</text>
+    </svg>`;
+    try { fsSync.writeFileSync(GENERIC_CARD_BACK_PATH, svg); } catch (e) { vLog('CACHE_ERR', `Failed to write generic card back placeholder: ${e.message}`); }
+}
+
+/**
+ * Records a real "someone actually looked at this" event for one cached
+ * image, driving usage-weighted eviction (see runImageCacheBudgetAudit).
+ * Deliberately called ONLY from the code path that serves an image to a
+ * live request — never from background preloading (queueImagePreload),
+ * since a speculatively-preloaded-but-never-viewed image should stay at
+ * hit_count 0 and be first in line for culling, not get artificially
+ * boosted just because the daemon fetched it opportunistically. Fire-and-
+ * forget from callers (never awaited) so a counter update can never add
+ * latency to an image response.
+ */
+async function recordImageHit(scryfallId, type, face) {
+    if (!db) return;
+    try {
+        await withWriteLock(async () => {
+            db.prepare(`
+                UPDATE image_cache SET hit_count = hit_count + 1, last_hit_at = ?
+                WHERE scryfall_id = ? AND type = ? AND face = ?
+            `).run(Date.now(), scryfallId, type, face);
+        });
+    } catch (e) {
+        vLog('CACHE_ERR', `Failed to record image hit for ${scryfallId}/${type}/${face}: ${e.message}`);
+    }
+}
+
 async function fetchAndCacheImage(id, type, face = 'front', priority = 'urgent') {
     const relPath = `${id}_${type}_${face}.jpg`;
     const fullPath = path.join(IMG_CACHE_DIR, relPath);
@@ -3299,10 +3629,15 @@ async function fetchAndCacheImage(id, type, face = 'front', priority = 'urgent')
         const sha256 = hash.digest('hex');
         await withWriteLock(async () => {
             db.prepare(`
-                INSERT INTO image_cache (scryfall_id, type, face, rel_path, bytes, sha256, cached_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO image_cache (scryfall_id, type, face, rel_path, bytes, sha256, cached_at, hit_count, last_hit_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL)
                 ON CONFLICT(scryfall_id, type, face) DO UPDATE SET
                     rel_path = excluded.rel_path, bytes = excluded.bytes, sha256 = excluded.sha256, cached_at = excluded.cached_at
+                    -- hit_count/last_hit_at deliberately NOT touched here: a
+                    -- re-fetch (e.g. after eviction or a stale-file repair)
+                    -- is not a new image, and resetting its popularity to 0
+                    -- would make it look artificially "least used" and an
+                    -- immediate re-eviction target on the very next audit.
             `).run(id, type, face, relPath, downloadedBytes, sha256, Date.now());
         });
 
@@ -3769,7 +4104,20 @@ function compileAstToSql(node) {
                 // "Liliana's Contract" etc.
                 ftsQuery = sanitized.map((w) => (w.length <= 3 ? w : `${w}*`)).join(' ');
             }
-            const clause = { sql: `cards.rowid IN (SELECT rowid FROM cards_fts WHERE cards_fts MATCH ?)`, params: [ftsQuery] };
+            // BUGFIX (found via live testing — "sol ring" pulling in "Ensoul
+            // Ring"/"Ring Out"): FTS5's default MATCH semantics let each
+            // term in a multi-word query satisfy the match in a DIFFERENT
+            // column of the same row (e.g. "sol" hitting oracle_text while
+            // "ring" hits name on some unrelated card) — it does not require
+            // the terms to co-occur in one field. Column-scoping the exact
+            // same query string into two explicit alternatives (name-only,
+            // or the combined rules-text columns) forces every term in a
+            // phrase to land together in ONE field, eliminating that
+            // cross-column false-positive class entirely while still
+            // matching real oracle-text/type-line searches the same as
+            // before.
+            const scopedQuery = `{name}: ${ftsQuery} OR {type_line oracle_text flavor_text}: ${ftsQuery}`;
+            const clause = { sql: `cards.rowid IN (SELECT rowid FROM cards_fts WHERE cards_fts MATCH ?)`, params: [scopedQuery] };
             return node.negate ? { sql: `NOT (${clause.sql})`, params: clause.params } : clause;
         }
         case 'field': {
@@ -3797,7 +4145,14 @@ const ORDER_COLUMN_MAP = {
 
 function extractGlobalModifiers(rawQuery) {
     let q = rawQuery;
-    let order = null, direction = null, unique = 'cards';
+    // Default changed from Scryfall's own 'cards' default to 'prints': the
+    // user wants every matching row returned as-is — no collapsing by
+    // oracle_id (unique:cards) or illustration_id (unique:art), and
+    // definitely no separate foil/nonfoil binning (which was never a real
+    // grouping key here anyway — foil/nonfoil are just flags on a single
+    // printing row, not a dedup axis). unique:cards / unique:art are still
+    // available as explicit opt-ins via the query string.
+    let order = null, direction = null, unique = 'prints';
     q = q.replace(/\border:(\S+)/gi, (m0, v) => { order = v.toLowerCase(); return ' '; });
     q = q.replace(/\bdirection:(\S+)/gi, (m0, v) => { direction = v.toLowerCase(); return ' '; });
     q = q.replace(/\bunique:(\S+)/gi, (m0, v) => { unique = v.toLowerCase(); return ' '; });
@@ -3963,7 +4318,8 @@ app.post('/api/admin/resync/:source', async (req, res) => {
         else if (source === 'manapool') { manapoolForceFlag.force = true; }
         else if (source === 'scryfall') { runScryfallBulkSync(true).catch((e) => vLog('SCRYFALL_ERR', e.message)); }
         else if (source === 'heal') { runSelfAudit().catch((e) => vLog('AUDIT_ERR', e.message)); }
-        else return res.status(400).json({ success: false, error: 'Unknown source. Use one of: mtgjson, manapool, scryfall, heal.' });
+        else if (source === 'diskspace') { runDiskSpaceAudit().catch((e) => vLog('DISK_AUDIT_ERR', e.message)); }
+        else return res.status(400).json({ success: false, error: 'Unknown source. Use one of: mtgjson, manapool, scryfall, heal, diskspace.' });
         res.json({ success: true, message: `${source} resync triggered.` });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -3992,6 +4348,7 @@ app.get('/cache/:scryfallId/:type.jpg', async (req, res) => {
         const fullPath = path.join(IMG_CACHE_DIR, cacheRow.rel_path);
         if (fsSync.existsSync(fullPath) && fsSync.statSync(fullPath).size > 0) {
             stats.cacheHits++;
+            recordImageHit(id, type, face).catch(() => {}); // fire-and-forget: never delay a response for a counter update
             queueImagePreload(id); // opportunistic: even on a hit, fill in any other sizes/faces we're still missing
             return res.sendFile(fullPath);
         }
@@ -4004,10 +4361,23 @@ app.get('/cache/:scryfallId/:type.jpg', async (req, res) => {
     vLog('CACHE', `Image cache MISS for ${id} (${type}/${face}). Fetching from Scryfall CDN (urgent priority)...`);
     const result = await fetchAndCacheImage(id, type, face, 'urgent');
     if (!result.ok) {
-        // A requested 'back' face on a single-faced card is a legitimate
-        // 404, not a system fault — everything else still gets a real error.
+        // A requested 'back' face is never allowed to dead-end in a JSON
+        // error: whether this card is genuinely single-faced (Scryfall has
+        // no back art to give us — a normal, permanent 404) or the fetch
+        // merely failed transiently, the frontend's flip button should
+        // always have *something* to show. Serve the shared generic card
+        // back placeholder in either case. This is intentionally NOT
+        // written into image_cache — it's not a real cached asset for this
+        // card, just a stand-in — so a genuinely double-faced card that hit
+        // a transient failure will still be retried for real on next request.
+        if (face === 'back') {
+            ensureGenericCardBack();
+            vLog('CACHE', `No real back face available for ${id} (${result.status === 404 ? '404 — likely single-faced' : `error: ${result.error || result.status}`}). Serving generic card back placeholder.`);
+            return res.sendFile(GENERIC_CARD_BACK_PATH);
+        }
         return res.status(result.status || 500).json({ success: false, error: result.error || 'Image not found on Scryfall.' });
     }
+    recordImageHit(id, type, face).catch(() => {}); // this was a live, on-demand fetch — counts as a real hit
     queueImagePreload(id); // now that this card has been touched, top up the rest in the background
     return res.sendFile(result.path);
 });
@@ -4137,6 +4507,7 @@ app.get(/.*/, (req, res) => {
 async function start() {
     vLog('SYSTEM', 'Starting MTG Oracle Daemon v4.0 (Bedrock) initialization sequence...');
     await ensureDirectories();
+    ensureGenericCardBack();
     initDatabase();
 
     if (stats.cardCount === 0) {
@@ -4148,8 +4519,6 @@ async function start() {
         }
         updateCounts();
     }
-
-    await runSelfAudit();
 
     app.listen(PORT, () => {
         vLog('SYSTEM', `Express HTTP Server listening on port ${PORT}`);
@@ -4170,9 +4539,12 @@ async function start() {
 
     startManapoolWorker().catch((e) => vLog('MANAPOOL_ERR', `Worker crashed: ${e.message}`));
     runEnrichmentTrickleWorker().catch((e) => vLog('ENRICH_ERR', `Trickle worker crashed: ${e.message}`));
+    startDiskAuditWorker().catch((e) => vLog('DISK_AUDIT_ERR', `Worker crashed: ${e.message}`));
 
     vLog('SYSTEM', 'Daemon fully initialized. All subsystems running.');
     sendToSupervisor({ type: 'ready' });
+	
+    runSelfAudit();
 }
 
 function gracefulShutdown(reason, intentional) {

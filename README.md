@@ -14,8 +14,14 @@ lots of things to fix, lots of things to implement, but at least things can be t
 
 the core principle is one file, (any attempts at splitting this to multiple files will be rejected); and one command to boot, and you have yourself a home hosted MTG api - can't get easier than this 
 Ease of use is my number one policy.
+just node server.js, 15 minutes later you have a fully populated MTG database/api you can use and abuse all you like, no rate limits here!
 
 As of uploading the repository - it IS WORKING, though specific api endpoints and usage may change over time 
+it is NOT intended for public facing, this is special, just for you <3 
+
+though WORKING, i am also still WORKING ON IT - it has many issues, it is in a USABLE state, but it is by no means set-and-forget quite yet
+i'd check for updates at least once a week, ideally once every day or two
+
 feel free to fork this project, do what you want with it, i dont care
 though centralisation and collaboration into a single effort would be beneficial, in my opinion
 
