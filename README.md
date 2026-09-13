@@ -12,7 +12,7 @@ i WILL however be slowly migrating this to a hand maintained copy in good time -
 
 lots of things to fix, lots of things to implement, but at least things can be tracked here
 
-the core principle is one file, (any attempts at splitting this to multiple files will be rejected); and one command to boot, and you have yourself a home hosted MTG api - can't get easier than this 
+the core principle is one file, (any attempts at splitting this to multiple files will be rejected) (frontend is OPTIONAL); and one command to boot, and you have yourself a home hosted MTG api - can't get easier than this 
 Ease of use is my number one policy.
 just node server.js, 15 minutes later you have a fully populated MTG database/api you can use and abuse all you like, no rate limits here!
 
