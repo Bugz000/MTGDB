@@ -112,6 +112,8 @@ npm install
 
 # Run the daemon (launches supervisor, TUI, and Express server on port 3000)
 node server.js
+# wait aprx 15 minutes for data population, but it should come up pretty quickly after that
+# Enjoy
 ```
 
 > **Headless Mode:** To run without the interactive TUI (e.g., inside Docker or systemd), set `MTG_HEADLESS=1`:
