@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MTG Database</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #020617; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+        /* Card art flip (front <-> back) */
+        .card-flip-scene { perspective: 1600px; }
+        .card-flip-inner {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            transition: transform 0.6s cubic-bezier(0.4, 0.15, 0.2, 1);
+            transform-style: preserve-3d;
+        }
+        .card-flip-inner.is-flipped { transform: rotateY(180deg); }
+        .card-flip-face {
+            position: absolute;
+            inset: 0;
+            backface-visibility: hidden;
+            -webkit-backface-visibility: hidden;
+        }
+        .card-flip-face.card-flip-back { transform: rotateY(180deg); }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 h-screen font-sans antialiased flex flex-col overflow-hidden">
+    <header class="w-full px-4 py-3 border-b border-slate-800 bg-slate-950/80 backdrop-blur z-30 flex flex-col sm:flex-row justify-between items-center gap-3 shrink-0">
+        <div class="flex items-center space-x-2">
+            <h1 class="text-lg font-extrabold tracking-tight text-cyan-400">MTG DB</h1>
+            <span class="inline-block w-2 h-2 bg-emerald-500 rounded-full animate-pulse ml-2"></span>
+        </div>
+        <div class="w-full sm:max-w-xl flex items-center gap-2">
+            <div class="relative flex-1">
+                <input 
+                    type="text" 
+                    id="searchInput" 
+                    placeholder="Scryfall query (e.g., c:blue t:creature or lotus)..." 
+                    class="w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-1.5 pl-9 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-all shadow-inner"
+                >
+                <svg class="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                </svg>
+            </div>
+            <select id="sortSelect" class="bg-slate-900 border border-slate-700 rounded-md px-2 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-cyan-500">
+                <option value="">Best Match</option>
+                <option value="name">Name (A-Z)</option>
+                <option value="usd">Price (High-Low)</option>
+                <option value="released">Newest Set</option>
+                <option value="rarity">Rarity</option>
+            </select>
+        </div>
+        <div class="text-[10px] font-mono text-slate-400 hidden md:block">
+            <span id="resultCount" class="text-cyan-400 font-bold">0</span> results
+        </div>
+    </header>
+
+    <main class="flex-1 flex overflow-hidden min-h-0">
+        <div class="flex-1 overflow-y-auto p-4 custom-scrollbar min-h-0">
+            <div id="resultsGrid" class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 gap-3">
+                <div class="col-span-full text-center py-20 text-slate-600 text-xs border border-dashed border-slate-800 rounded-lg">
+                    Type a query above to search the database.
+                </div>
+            </div>
+        </div>
+
+        <div class="w-[520px] xl:w-[680px] border-l border-slate-800 bg-slate-900 flex flex-col shrink-0 min-h-0">
+            <div class="px-4 py-2 border-b border-slate-800 bg-slate-950/50 flex justify-between items-center shrink-0">
+                <h2 class="text-[10px] font-bold uppercase tracking-widest text-slate-400">Card Intelligence</h2>
+                <div class="flex gap-1 bg-slate-900 p-0.5 rounded border border-slate-800">
+                    <button id="viewFormattedBtn" onclick="switchTab('formatted')" class="px-2 py-0.5 text-[9px] font-bold rounded bg-slate-800 text-cyan-400">Overview</button>
+                    <button id="viewStagesBtn" onclick="switchTab('stages')" class="px-2 py-0.5 text-[9px] font-bold rounded text-slate-400 hover:text-slate-200">Processing Stages</button>
+                    <button id="viewDumpBtn" onclick="switchTab('dump')" class="px-2 py-0.5 text-[9px] font-bold rounded text-slate-400 hover:text-slate-200">Raw Dump</button>
+                </div>
+            </div>
+
+            <div id="formattedTab" class="flex-1 overflow-y-auto p-4 custom-scrollbar min-h-0">
+                <div class="h-full flex flex-col justify-center items-center text-slate-500 text-xs">
+                    Select a card to view complete intelligence and historical data.
+                </div>
+            </div>
+
+            <div id="stagesTab" class="hidden flex-1 flex-col p-4 overflow-y-auto custom-scrollbar min-h-0 bg-slate-950">
+                <div class="h-full flex flex-col justify-center items-center text-slate-500 text-xs">
+                    Select a card to view validation and pipeline stages.
+                </div>
+            </div>
+
+            <div id="dumpTab" class="hidden flex-1 flex-col p-3 min-h-0 bg-slate-950">
+                <div class="flex justify-between items-center mb-2 shrink-0">
+                    <span class="text-[9px] font-mono text-slate-500 uppercase">GET /api/cards/:id/dump</span>
+                    <button onclick="copyDumpData()" class="text-[9px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-0.5 rounded font-mono">Copy JSON</button>
+                </div>
+                <pre id="dumpContainer" class="flex-1 overflow-auto p-3 bg-slate-900/50 border border-slate-800 rounded text-[10px] font-mono text-cyan-300 leading-relaxed custom-scrollbar selection:bg-cyan-900 selection:text-cyan-100">Select a card to inspect raw database dump.</pre>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const searchInput = document.getElementById('searchInput');
+        const sortSelect = document.getElementById('sortSelect');
+        const resultsGrid = document.getElementById('resultsGrid');
+        const resultCount = document.getElementById('resultCount');
+        const formattedTab = document.getElementById('formattedTab');
+        const stagesTab = document.getElementById('stagesTab');
+        const dumpTab = document.getElementById('dumpTab');
+        const dumpContainer = document.getElementById('dumpContainer');
+        const viewFormattedBtn = document.getElementById('viewFormattedBtn');
+        const viewStagesBtn = document.getElementById('viewStagesBtn');
+        const viewDumpBtn = document.getElementById('viewDumpBtn');
+        const searchResultsContainer = resultsGrid.closest('.overflow-y-auto');
+
+        let debounceTimer;
+        let currentPage = 1;
+        let currentRawQuery = '';
+        let currentSort = '';
+        let isLoading = false;
+        let hasMore = false;
+        let currentCardId = null;
+        let rawDumpData = null;
+
+        window.addEventListener('DOMContentLoaded', () => {
+            const urlParams = new URLSearchParams(window.location.search);
+            const cardId = urlParams.get('card');
+            const searchQuery = urlParams.get('q');
+            const sortParam = urlParams.get('sort');
+
+            if (sortParam) { sortSelect.value = sortParam; currentSort = sortParam; }
+
+            if (searchQuery) {
+                searchInput.value = searchQuery;
+                currentRawQuery = searchQuery;
+                fetchCards(currentRawQuery, true);
+            }
+
+            if (cardId) {
+                loadCardDetails(cardId, false);
+                ensureCardVisibleInGrid(cardId);
+            }
+        });
+
+        function switchTab(tab) {
+            formattedTab.classList.add('hidden');
+            stagesTab.classList.add('hidden');
+            dumpTab.classList.add('hidden');
+            dumpTab.classList.remove('flex');
+            
+            viewFormattedBtn.className = 'px-2 py-0.5 text-[9px] font-bold rounded text-slate-400 hover:text-slate-200';
+            viewStagesBtn.className = 'px-2 py-0.5 text-[9px] font-bold rounded text-slate-400 hover:text-slate-200';
+            viewDumpBtn.className = 'px-2 py-0.5 text-[9px] font-bold rounded text-slate-400 hover:text-slate-200';
+
+            if (tab === 'formatted') {
+                formattedTab.classList.remove('hidden');
+                viewFormattedBtn.className = 'px-2 py-0.5 text-[9px] font-bold rounded bg-slate-800 text-cyan-400';
+            } else if (tab === 'stages') {
+                stagesTab.classList.remove('hidden');
+                viewStagesBtn.className = 'px-2 py-0.5 text-[9px] font-bold rounded bg-slate-800 text-cyan-400';
+            } else {
+                dumpTab.classList.remove('hidden');
+                dumpTab.classList.add('flex');
+                viewDumpBtn.className = 'px-2 py-0.5 text-[9px] font-bold rounded bg-slate-800 text-cyan-400';
+            }
+        }
+
+        function copyDumpData() {
+            if (!rawDumpData) return;
+            navigator.clipboard.writeText(JSON.stringify(rawDumpData, null, 2));
+        }
+
+        function flipCard() {
+            const inner = document.getElementById('cardFlipInner');
+            if (inner) inner.classList.toggle('is-flipped');
+        }
+
+        function buildFullQueryString() {
+            let q = currentRawQuery.trim();
+            if (currentSort && !q.toLowerCase().includes('order:') && !q.toLowerCase().includes('sort:')) {
+                q += ` order:${currentSort}`;
+            }
+            return q;
+        }
+
+        function updateURL() {
+            const url = new URL(window.location);
+            if (currentRawQuery) url.searchParams.set('q', currentRawQuery); else url.searchParams.delete('q');
+            if (currentSort) url.searchParams.set('sort', currentSort); else url.searchParams.delete('sort');
+            window.history.replaceState({}, '', url);
+        }
+
+        searchInput.addEventListener('input', (e) => {
+            clearTimeout(debounceTimer);
+            currentRawQuery = e.target.value.trim();
+            currentPage = 1;
+            hasMore = false;
+            updateURL();
+
+            if (!currentRawQuery) {
+                resultsGrid.innerHTML = '<div class="col-span-full text-center py-20 text-slate-600 text-xs border border-dashed border-slate-800 rounded-lg">Type a query above to search the database.</div>';
+                resultCount.textContent = '0';
+                return;
+            }
+            debounceTimer = setTimeout(() => fetchCards(currentRawQuery, true), 300);
+        });
+
+        sortSelect.addEventListener('change', (e) => {
+            currentSort = e.target.value;
+            currentPage = 1;
+            hasMore = false;
+            updateURL();
+            if (currentRawQuery) fetchCards(currentRawQuery, true);
+        });
+
+        searchResultsContainer.addEventListener('scroll', () => {
+            if (isLoading || !hasMore) return;
+            const threshold = 150; 
+            if (searchResultsContainer.scrollTop + searchResultsContainer.clientHeight >= searchResultsContainer.scrollHeight - threshold) {
+                currentPage++;
+                fetchCards(currentRawQuery, false);
+            }
+        });
+
+        async function fetchCards(query, reset = false) {
+            if (!query) return;
+            isLoading = true;
+            try {
+                const fullQuery = buildFullQueryString();
+                const res = await fetch(`/api/search?q=${encodeURIComponent(fullQuery)}&page=${currentPage}`);
+                const json = await res.json();
+
+                if (json.object === 'error') {
+                    if (reset) {
+                        resultsGrid.innerHTML = `<div class="col-span-full text-center py-20 text-rose-500 text-xs border border-dashed border-rose-900/50 rounded-lg">${json.details || 'Search error.'}</div>`;
+                        resultCount.textContent = '0';
+                    }
+                    return;
+                }
+
+                hasMore = !!json.has_more;
+
+                if (reset) {
+                    resultCount.textContent = json.total_cards || 0; 
+                    if (!json.data || json.data.length === 0) {
+                        resultsGrid.innerHTML = '<div class="col-span-full text-center py-20 text-slate-600 text-xs border border-dashed border-slate-800 rounded-lg">No matching cards found.</div>';
+                        isLoading = false;
+                        return;
+                    }
+                    resultsGrid.innerHTML = '';
+                }
+
+                const html = (json.data || []).map(card => {
+                    let numPrice, currencyUnit, currencySuffix;
+                    if (card.price_display != null && !isNaN(parseFloat(card.price_display))) {
+                        numPrice = parseFloat(card.price_display);
+                        currencyUnit = { usd: '$', eur: '€', tix: '' }[card.price_currency] || '';
+                        currencySuffix = card.price_currency === 'tix' ? ' TIX' : '';
+                    } else {
+                        const fallback = [
+                            { value: card.price_usd, unit: '$', suffix: '' },
+                            { value: card.price_usd_foil, unit: '$', suffix: '' },
+                            { value: card.price_eur, unit: '€', suffix: '' },
+                            { value: card.price_eur_foil, unit: '€', suffix: '' },
+                            { value: card.price_tix, unit: '', suffix: ' TIX' },
+                        ].find(p => !isNaN(parseFloat(p.value)) && parseFloat(p.value) > 0);
+                        numPrice = fallback ? parseFloat(fallback.value) : NaN;
+                        currencyUnit = fallback ? fallback.unit : '';
+                        currencySuffix = fallback ? fallback.suffix : '';
+                    }
+                    const priceHTML = (!isNaN(numPrice) && numPrice > 0)
+                        ? `<span class="font-mono font-bold text-[10px] text-emerald-400">${currencyUnit}${numPrice.toFixed(2)}${currencySuffix}</span>`
+                        : `<span class="font-mono font-bold text-[10px] text-slate-600">--</span>`;
+
+                    return `
+                    <div id="card-card-${card.scryfall_id}" onclick="loadCardDetails('${card.scryfall_id}', true)" class="bg-slate-950 border border-slate-800 hover:border-cyan-500 cursor-pointer rounded overflow-hidden transition-colors group flex flex-col shadow-sm">
+                        <div class="aspect-[5/7] bg-slate-900 relative">
+                            <img src="/cache/${card.scryfall_id}/small.jpg" alt="${card.name}" class="w-full h-full object-cover group-hover:brightness-110 transition-all" loading="lazy" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\'><rect width=\'100\' height=\'100\' fill=\'%230f172a\'/><text x=\'50%\' y=\'50%\' fill=\'%23475569\' font-size=\'10\' dominant-baseline=\'middle\' text-anchor=\'middle\' font-family=\'sans-serif\'>No Art</text></svg>'">
+                        </div>
+                        <div class="p-2 flex flex-col justify-between flex-1 gap-1">
+                            <div>
+                                <h3 class="font-bold text-[10px] text-slate-200 truncate group-hover:text-cyan-400 transition-colors">${card.name}</h3>
+                                <p class="text-[9px] text-slate-500 truncate">${card.type_line || 'Unknown'}</p>
+                            </div>
+                            <div class="flex justify-between items-center pt-1 border-t border-slate-800/80">
+                                ${priceHTML}
+                                <span class="uppercase font-mono text-[8px] bg-slate-800 px-1 py-0.5 rounded text-slate-400">${card.set_code || card.set}</span>
+                            </div>
+                        </div>
+                    </div>
+                    `;
+                }).join('');
+
+                if (reset) {
+                    resultsGrid.innerHTML = html;
+                } else {
+                    resultsGrid.insertAdjacentHTML('beforeend', html);
+                }
+            } catch (err) {
+                console.error('Search error:', err);
+            } finally {
+                isLoading = false;
+            }
+        }
+
+        async function ensureCardVisibleInGrid(scryfallId) {
+            let cardElement = document.getElementById(`card-card-${scryfallId}`);
+            let attempts = 0;
+            while (!cardElement && hasMore && attempts < 5) {
+                currentPage++;
+                await fetchCards(currentRawQuery, false);
+                cardElement = document.getElementById(`card-card-${scryfallId}`);
+                attempts++;
+            }
+            if (cardElement) {
+                cardElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                cardElement.classList.add('border-cyan-400', 'ring-2', 'ring-cyan-500');
+                setTimeout(() => cardElement.classList.remove('ring-2', 'ring-cyan-500'), 3000);
+            }
+        }
+
+        async function loadCardDetails(scryfallId, updateHistory = true) {
+            currentCardId = scryfallId;
+            if (updateHistory) {
+                const url = new URL(window.location);
+                url.searchParams.set('card', scryfallId);
+                window.history.pushState({}, '', url);
+            }
+
+            formattedTab.innerHTML = '<div class="animate-pulse grid grid-cols-2 gap-4"><div class="space-y-3"><div class="w-full aspect-[5/7] bg-slate-800 rounded"></div><div class="h-20 bg-slate-800 rounded"></div></div><div class="space-y-3"><div class="h-6 bg-slate-800 rounded"></div><div class="h-32 bg-slate-800 rounded"></div><div class="h-24 bg-slate-800 rounded"></div></div></div>';
+            dumpContainer.textContent = 'Loading raw dump...';
+            stagesTab.innerHTML = '<div class="animate-pulse flex flex-col gap-2"><div class="h-8 bg-slate-800 rounded w-full"></div><div class="h-8 bg-slate-800 rounded w-full"></div><div class="h-8 bg-slate-800 rounded w-full"></div></div>';
+
+            try {
+                const resDump = await fetch(`/api/cards/${scryfallId}/dump`);
+                const jsonDump = await resDump.json();
+
+                if (!jsonDump.data && !jsonDump.card) {
+                    formattedTab.innerHTML = `<div class="text-center py-12 text-rose-500 text-xs">${jsonDump.error || 'Failed to load card.'}</div>`;
+                    dumpContainer.textContent = 'Error loading dump.';
+                    stagesTab.innerHTML = '<div class="text-center py-12 text-rose-500 text-xs">Failed to load stages.</div>';
+                    return;
+                }
+
+                const rawPayload = jsonDump.data || jsonDump;
+                rawDumpData = rawPayload;
+                dumpContainer.textContent = JSON.stringify(rawDumpData, null, 2);
+
+                renderCardOverview(rawPayload);
+                renderCardStages(rawPayload);
+
+            } catch (err) {
+                console.error('Details fetch error:', err);
+                formattedTab.innerHTML = '<div class="text-center py-12 text-rose-500 text-xs">Failed to load card details.</div>';
+                dumpContainer.textContent = 'Error processing request.';
+                stagesTab.innerHTML = '<div class="text-center py-12 text-rose-500 text-xs">Error processing stages.</div>';
+            }
+        }
+
+        function renderCardStages(data) {
+            const stages = data.stages || [
+                { id: 1, name: 'Data Ingestion', status: 'success', checks: 12 },
+                { id: 2, name: 'Oracle Text Normalization', status: 'success', checks: 4 },
+                { id: 3, name: 'Pricing Sync', status: 'failed', checks: 3000, message: '3000 checks failed, fallback applied' },
+                { id: 4, name: 'Set ID & Relationship Mapping', status: 'success', checks: 8 },
+                { id: 5, name: 'Final Validation', status: 'success', checks: 1 }
+            ];
+
+            stagesTab.innerHTML = `
+                <div class="space-y-4 w-full max-w-2xl mx-auto">
+                    <h3 class="text-xs font-bold uppercase tracking-widest text-slate-400 mb-4 border-b border-slate-800 pb-2">Pipeline Validation Stages</h3>
+                    <div class="space-y-2">
+                        ${stages.map(stage => {
+                            const isFailed = stage.status === 'failed';
+                            return `
+                                <div class="flex items-center p-3 bg-slate-900 border ${isFailed ? 'border-amber-900/50' : 'border-slate-800'} rounded shadow-sm">
+                                    <div class="flex-shrink-0 mr-4">
+                                        ${isFailed ? 
+                                            `<span class="flex h-6 w-6 items-center justify-center rounded-full bg-amber-900/40 text-amber-500 border border-amber-800/50 text-[10px] font-bold">!</span>` : 
+                                            `<span class="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-900/40 text-emerald-500 border border-emerald-800/50 text-[10px] font-bold">✓</span>`
+                                        }
+                                    </div>
+                                    <div class="flex-1">
+                                        <h4 class="text-[11px] font-bold ${isFailed ? 'text-amber-400' : 'text-slate-200'}">${stage.name}</h4>
+                                        <p class="text-[9px] text-slate-500 mt-0.5">
+                                            Executed ${stage.checks} checks. ${stage.message ? `<span class="text-amber-500 ml-1">${stage.message}</span>` : ''}
+                                        </p>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderCardOverview(data) {
+            const card = data.card || {};
+            const scryfall = card.scryfall_data || {};
+            const mtgjson = card.mtgjson_data || {};
+            const sales = data.sales || [];
+            const images = data.images || [];
+            const nestedIdentifiers = {
+                ...(scryfall.identifiers || {}),
+                ...(mtgjson.identifiers || {}),
+                ...(card.identifiers || {})
+            };
+            
+            // Unify Rulings
+            const rulings = [
+                ...(data.rulings || []),
+                ...(card.rulings || []),
+                ...(scryfall.rulings || []),
+                ...(mtgjson.rulings || [])
+            ];
+            
+            const uniqueRulings = [];
+            const seenRulings = new Set();
+            for (let r of rulings) {
+                let comment = r.comment || r.text;
+                if (!comment || seenRulings.has(comment)) continue;
+                seenRulings.add(comment);
+                uniqueRulings.push({ date: r.published_at || r.date, comment });
+            }
+
+            // Unify Tags
+            const tags = [
+                ...(data.metadata_tags || []).map(t => ({ source: 'Metadata', val: t.tag })),
+                ...(data.oracle_tags || []).map(t => ({ source: 'Oracle', val: t.label || t.slug || t.tag_id })),
+                ...(data.art_tags || []).map(t => ({ source: 'Art', val: t.label || t.slug || t.tag_id })),
+                ...(data.tags || []).map(t => ({ source: 'Generic', val: t.tag || t }))
+            ];
+            const uniqueTags = [...new Map(tags.map(item => [item.val, item])).values()];
+
+            const getVal = (...paths) => {
+                for (let path of paths) {
+                    if (path !== undefined && path !== null && path !== '') return path;
+                }
+                return null;
+            };
+
+            let imgSrc = '';
+            const normalFromImages = images.find(i => i.type === 'normal');
+            if (normalFromImages) imgSrc = `/cache/${card.scryfall_id}/normal.jpg`;
+            else if (scryfall.image_uris && scryfall.image_uris.normal) imgSrc = scryfall.image_uris.normal;
+            else if (images.length > 0) imgSrc = `/cache/${card.scryfall_id}/${images[0].type}.jpg`;
+            else if (scryfall.image_uris) imgSrc = scryfall.image_uris.small;
+            else imgSrc = '...placeholder...';
+
+            const prices = scryfall.prices || {};
+            const priceUsd = getVal(prices.usd, card.price_usd);
+            const priceUsdFoil = getVal(prices.usd_foil, card.price_usd_foil);
+            const priceEur = getVal(prices.eur, card.price_eur);
+            const priceEurFoil = getVal(prices.eur_foil, card.price_eur_foil);
+            const priceTix = getVal(prices.tix, card.price_tix);
+
+            const headlinePrice = [
+                { value: priceUsd, unit: '$', suffix: '' },
+                { value: priceUsdFoil, unit: '$', suffix: '' },
+                { value: priceEur, unit: '€', suffix: '' },
+                { value: priceEurFoil, unit: '€', suffix: '' },
+                { value: priceTix, unit: '', suffix: ' TIX' },
+            ].find(p => !isNaN(parseFloat(p.value)) && parseFloat(p.value) > 0);
+
+            const rawLegalities = getVal(mtgjson.legalities, card.legalities, scryfall.legalities, {});
+            const legalities = Object.entries(rawLegalities).map(([format, status]) => ({
+                format,
+                status: String(status).toLowerCase().replace('_', ' ')
+            }));
+
+            // Identifier extraction & Consolidation
+            const extractId = (...keys) => {
+                for (let k of keys) {
+                    const val = getVal(card[k], scryfall[k], mtgjson[k], nestedIdentifiers[k]);
+                    if (val) return val;
+                }
+                return null;
+            };
+
+            const idListMap = new Map();
+            const addIdentifier = (label, value) => {
+                if (value !== undefined && value !== null && value !== '' && value !== 'null' && !idListMap.has(label)) {
+                    idListMap.set(label, String(value));
+                }
+            };
+
+            addIdentifier('Scryfall ID', extractId('scryfall_id', 'scryfallId', 'id'));
+            addIdentifier('Oracle ID', extractId('oracle_id', 'scryfallOracleId', 'oracle_ids'));
+            addIdentifier('Set ID', extractId('set_id', 'set_uri', 'set_search_uri'));
+            addIdentifier('MTGJSON UUID', extractId('mtgjson_uuid', 'mtgjsonV4Id', 'uuid'));
+            addIdentifier('Artist / Illustrator ID', extractId('artist_ids', 'artistIds', 'artist_id', 'illustrator_id', 'scryfallIllustrationId', 'illustration_id'));
+            addIdentifier('Manapool ID', extractId('manapool_id', 'manapoolId'));
+            addIdentifier('TCGPlayer Product ID', extractId('tcgplayer_id', 'tcgplayerProductId'));
+            addIdentifier('TCGPlayer Alt Foil ID', extractId('tcgplayerAlternativeFoilProductId'));
+            addIdentifier('Cardmarket ID', extractId('cardmarket_id', 'mcmId'));
+            addIdentifier('Card Kingdom ID', extractId('cardKingdomId'));
+            addIdentifier('Card Kingdom Foil ID', extractId('cardKingdomFoilId'));
+            addIdentifier('Cardsphere ID', extractId('cardsphereId'));
+            addIdentifier('Cardsphere Foil ID', extractId('cardsphereFoilId'));
+            addIdentifier('MTGO ID', extractId('mtgo_id', 'mtgo_foil_id'));
+            addIdentifier('Arena ID', extractId('arena_id'));
+            addIdentifier('Card Back ID', extractId('card_back_id', 'scryfallCardBackId'));
+            addIdentifier('Sync Source ID', extractId('source_sync_id'));
+
+            const idList = Array.from(idListMap.entries()).map(([label, val]) => ({ label, val }));
+
+            // Set & Setlist / Printings Info
+            const currentSetCode = (getVal(card.set_code, card.set, scryfall.set, mtgjson.setCode) || '').toUpperCase();
+            const currentSetName = getVal(card.set_name, scryfall.set_name, mtgjson.setName, currentSetCode || 'Unknown Set');
+            const setType = getVal(card.set_type, scryfall.set_type, mtgjson.setType, '');
+            const subsets = getVal(card.subsets, scryfall.subsets, mtgjson.subsets, []);
+            const subsetStr = Array.isArray(subsets) ? subsets.join(', ') : subsets;
+            const releaseDate = getVal(card.released_at, scryfall.released_at, mtgjson.releaseDate, card.originalReleaseDate);
+            const rawPrintings = getVal(card.printings, scryfall.printings, mtgjson.printings, []);
+            const printingsList = Array.isArray(rawPrintings) ? rawPrintings : [];
+
+            const coreFields = new Set([
+                'name', 'type_line', 'type', 'types', 'mana_cost', 'manaCost', 'oracle_text', 'text', 'originalText',
+                'flavor_text', 'flavorText', 'scryfall_data', 'mtgjson_data', 'sales', 'images', 'tags', 'metadata_tags',
+                'oracle_tags', 'art_tags', 'rulings', 'prices', 'legalities', 'image_uris', 'id', 'scryfall_id', 
+                'oracle_id', 'illustrator_id', 'tcgplayer_id', 'cardmarket_id', 'manapool_id', 'manapoolId', 'mtgo_id', 'arena_id', 
+                'set_id', 'uuid', 'artist', 'artistIds', 'artist_ids', 'illustration_id', 'identifiers', 'card_back_id',
+                'printings', 'set', 'set_code', 'setCode', 'set_name', 'setName', 'set_type', 'setType', 'subsets', 
+                'released_at', 'originalReleaseDate', 'mtgjson_uuid', 'scryfallCardBackId', 'scryfallIllustrationId',
+                'scryfallOracleId', 'tcgplayerProductId', 'tcgplayerAlternativeFoilProductId', 'mcmId', 'cardKingdomId',
+                'cardKingdomFoilId', 'cardsphereId', 'cardsphereFoilId', 'source_sync_id', 'sourceProducts', 'stages'
+            ]);
+
+            const mergedData = { ...scryfall, ...mtgjson, ...card };
+            
+            function renderObj(obj, depth = 0) {
+                if (obj === null || obj === undefined) return '<span class="text-slate-500 italic">null</span>';
+                if (typeof obj !== 'object') return `<span class="text-slate-300 break-words">${String(obj)}</span>`;
+                if (Array.isArray(obj)) {
+                    if (obj.length === 0) return '<span class="text-slate-500">[]</span>';
+                    if (depth > 3) return `<span class="text-slate-500">[Array(${obj.length})]</span>`;
+                    return `<div class="flex flex-col gap-1 pl-2 border-l border-slate-700/50 mt-1">${obj.map(v => renderObj(v, depth + 1)).join('')}</div>`;
+                }
+                const keys = Object.keys(obj);
+                if (keys.length === 0) return '<span class="text-slate-500">{}</span>';
+                if (depth > 3) return `<span class="text-slate-500">{Object}</span>`;
+                return `<div class="flex flex-col gap-1 pl-2 border-l border-slate-700/50 mt-1 w-full text-[9px] font-mono">
+                    ${keys.map(k => `
+                        <div class="flex flex-col sm:flex-row sm:gap-2 border-b border-slate-800/30 pb-0.5 last:border-0">
+                            <span class="text-cyan-600/70 font-bold w-1/3 shrink-0 truncate" title="${k}">${k}</span>
+                            <div class="w-2/3">${renderObj(obj[k], depth + 1)}</div>
+                        </div>
+                    `).join('')}
+                </div>`;
+            }
+
+            let proceduralHTML = '';
+            Object.keys(mergedData).sort().forEach(k => {
+                if (!coreFields.has(k)) {
+                    proceduralHTML += `
+                        <div class="bg-slate-900 p-1.5 rounded border border-slate-800 mb-1 overflow-hidden">
+                            <div class="text-[9px] font-bold text-cyan-500 mb-0.5">${k}</div>
+                            ${renderObj(mergedData[k])}
+                        </div>
+                    `;
+                }
+            });
+
+            formattedTab.innerHTML = `
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                    <!-- Column 1: Image, Identifiers, Set UI, Sales -->
+                    <div class="space-y-4 max-h-[85vh] overflow-y-auto custom-scrollbar pr-1 pb-10">
+                        <!-- Header Block -->
+                        <div>
+                            <div class="flex justify-between items-start gap-2 mb-1">
+                                <div>
+                                    <h2 class="text-base font-extrabold text-slate-100 leading-tight">${getVal(card.name, scryfall.name, mtgjson.name, 'Unknown')}</h2>
+                                    <p class="text-[10px] text-slate-400 font-medium">${getVal(card.type_line, scryfall.type_line, mtgjson.type, '')}</p>
+                                </div>
+                                <div class="flex flex-col items-end shrink-0">
+                                    ${headlinePrice ? `<span class="text-lg font-mono font-bold text-emerald-400">${headlinePrice.unit}${parseFloat(headlinePrice.value).toFixed(2)}${headlinePrice.suffix}</span>` : '<span class="text-lg font-mono font-bold text-slate-600">--</span>'}
+                                    ${card.mana_cost ? `<span class="font-mono bg-slate-800 px-1 py-0.5 rounded text-cyan-400 font-bold text-[10px] mt-1">${card.mana_cost}</span>` : ''}
+                                </div>
+                            </div>
+
+                            <div class="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[9px] pt-1">
+                                ${priceUsd ? `<div class="flex gap-1"><span class="text-slate-500">USD</span><span class="text-emerald-400">$${parseFloat(priceUsd).toFixed(2)}</span></div>` : ''}
+                                ${priceUsdFoil ? `<div class="flex gap-1"><span class="text-slate-500">FOIL</span><span class="text-emerald-400">$${parseFloat(priceUsdFoil).toFixed(2)}</span></div>` : ''}
+                                ${priceEur ? `<div class="flex gap-1"><span class="text-slate-500">EUR</span><span class="text-emerald-400">€${parseFloat(priceEur).toFixed(2)}</span></div>` : ''}
+                                ${priceEurFoil ? `<div class="flex gap-1"><span class="text-slate-500">EUR FOIL</span><span class="text-emerald-400">€${parseFloat(priceEurFoil).toFixed(2)}</span></div>` : ''}
+                                ${priceTix ? `<div class="flex gap-1"><span class="text-slate-500">TIX</span><span class="text-emerald-400">${parseFloat(priceTix).toFixed(2)}</span></div>` : ''}
+                            </div>
+                        </div>
+
+                        <!-- Image Block -->
+                        <div class="bg-slate-950 p-2 rounded border border-slate-800 space-y-2">
+                            <div class="card-flip-scene w-full aspect-[5/7] relative">
+                                <div id="cardFlipInner" class="card-flip-inner">
+                                    <div class="card-flip-face bg-slate-900 rounded border border-slate-700 overflow-hidden shadow-lg">
+                                        <img src="${imgSrc}" alt="${card.name}" class="w-full h-full object-cover" onerror="this.onerror=null; this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\'><rect width=\'100\' height=\'100\' fill=\'%230f172a\'/><text x=\'50%\' y=\'50%\' fill=\'%23475569\' font-size=\'10\' dominant-baseline=\'middle\' text-anchor=\'middle\' font-family=\'sans-serif\'>No Art</text></svg>'">
+                                    </div>
+                                    <div class="card-flip-face card-flip-back bg-slate-900 rounded border border-slate-700 overflow-hidden shadow-lg">
+                                        <img src="/cache/${card.scryfall_id}/normal.jpg?face=back" alt="${card.name} (back)" class="w-full h-full object-cover" loading="lazy" onerror="this.onerror=null; this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\'><rect width=\'100\' height=\'100\' fill=\'%230f0f1a\'/><text x=\'50%\' y=\'50%\' fill=\'%236a6a7a\' font-size=\'10\' dominant-baseline=\'middle\' text-anchor=\'middle\' font-family=\'sans-serif\'>Back Unavailable</text></svg>'">
+                                    </div>
+                                </div>
+                                <button onclick="flipCard()" title="Flip card art" class="absolute bottom-2 right-2 z-10 bg-slate-950/80 hover:bg-cyan-950 border border-slate-700 hover:border-cyan-500 text-slate-300 hover:text-cyan-400 rounded-full w-8 h-8 flex items-center justify-center shadow-lg transition-all backdrop-blur-sm">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m0 0a8.001 8.001 0 0115.357-2M4.582 9H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357 2m15.357-2H15"></path>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Identifiers (Placed Under Image, Above Set & Price History) -->
+                        <div>
+                            <div class="flex justify-between items-center mb-1">
+                                <span class="text-[9px] font-bold uppercase tracking-widest text-slate-400">Identifiers</span>
+                                <span class="text-[8px] font-mono text-cyan-500">${idList.length} Keys</span>
+                            </div>
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-1.5 bg-slate-950 p-2 rounded border border-slate-800">
+                                ${idList.map(idObj => `
+                                    <div class="flex flex-col bg-slate-900/60 p-1.5 rounded border border-slate-800/80 hover:border-slate-700 transition-colors">
+                                        <span class="text-[8px] font-semibold text-slate-400 uppercase tracking-wider">${idObj.label}</span>
+                                        <span class="text-[9px] font-mono text-cyan-400 break-all select-all leading-tight mt-0.5">${idObj.val}</span>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+
+                        <!-- Set & Setlist / Printings UI Element -->
+                        <div class="bg-slate-950 p-2.5 rounded border border-slate-800 space-y-2">
+                            <div class="flex justify-between items-start border-b border-slate-800 pb-2">
+                                <div>
+                                    <span class="text-[8px] font-bold uppercase tracking-widest text-cyan-500 block">Set Information</span>
+                                    <h3 class="text-xs font-extrabold text-slate-200 mt-0.5">${currentSetName}</h3>
+                                </div>
+                                <div class="flex items-center gap-1.5 shrink-0">
+                                    <span class="bg-cyan-950 text-cyan-300 font-mono font-extrabold text-[10px] px-2 py-0.5 rounded border border-cyan-800">${currentSetCode}</span>
+                                    ${setType ? `<span class="bg-slate-800 text-slate-400 font-mono text-[8px] uppercase px-1.5 py-0.5 rounded">${setType}</span>` : ''}
+                                </div>
+                            </div>
+
+                            ${subsetStr || releaseDate ? `
+                                <div class="flex flex-wrap gap-2 text-[9px] font-mono text-slate-400 pt-0.5">
+                                    ${releaseDate ? `<div><span class="text-slate-500">Released:</span> <span class="text-slate-300">${releaseDate}</span></div>` : ''}
+                                    ${subsetStr ? `<div><span class="text-slate-500">Subset:</span> <span class="text-cyan-400">${subsetStr}</span></div>` : ''}
+                                </div>
+                            ` : ''}
+
+                            <!-- Printings / Setlist -->
+                            <div class="pt-1 border-t border-slate-800/60">
+                                <div class="flex justify-between items-center mb-1.5">
+                                    <span class="text-[8px] font-bold uppercase tracking-widest text-slate-400">Printings Setlist</span>
+                                    <span class="text-[8px] font-mono text-slate-500">${printingsList.length} Printings</span>
+                                </div>
+                                ${printingsList.length === 0 ? '<p class="text-[9px] text-slate-600 italic">No additional printings recorded.</p>' : `
+                                    <div class="flex flex-wrap gap-1 max-h-28 overflow-y-auto custom-scrollbar p-1 bg-slate-900/40 rounded border border-slate-800/50">
+                                        ${printingsList.map(pCode => {
+                                            const codeUpper = String(pCode).toUpperCase();
+                                            const isCurrent = codeUpper === currentSetCode;
+                                            return `
+                                                <span class="text-[9px] font-mono px-1.5 py-0.5 rounded border transition-colors ${
+                                                    isCurrent 
+                                                    ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/60 font-bold shadow-sm' 
+                                                    : 'bg-slate-900 text-slate-400 border-slate-800 hover:border-slate-700 hover:text-slate-200'
+                                                }">${codeUpper}</span>
+                                            `;
+                                        }).join('')}
+                                    </div>
+                                `}
+                            </div>
+                        </div>
+
+                        <!-- Sales History -->
+                        <div>
+                            <span class="text-[9px] font-bold uppercase tracking-widest text-slate-500 block mb-1">Sales History (${sales.length})</span>
+                            ${sales.length === 0 ? '<p class="text-slate-600 italic py-2 text-[10px] text-center bg-slate-950 rounded border border-slate-800">No sale records available.</p>' : `
+                                <div class="space-y-1 max-h-48 overflow-y-auto custom-scrollbar pr-1">
+                                    ${sales.map(sale => {
+                                        const dateStr = sale.date ? new Date(sale.date).toLocaleDateString() : (sale.source_date || '--');
+                                        return `
+                                            <div class="flex justify-between items-center bg-slate-950 px-1.5 py-1 rounded border border-slate-800 text-[9px]">
+                                                <div class="flex flex-col">
+                                                    <span class="font-mono font-bold text-emerald-400">$${parseFloat(sale.price).toFixed(2)}</span>
+                                                    <span class="text-[8px] text-slate-400">${sale.condition || 'Unknown'} ${sale.foil ? '• Foil' : ''}</span>
+                                                </div>
+                                                <div class="text-right flex flex-col">
+                                                    <span class="text-[8px] font-mono text-slate-400">${dateStr}</span>
+                                                    <span class="text-[8px] text-slate-600">Qty: ${sale.quantity || 1}</span>
+                                                </div>
+                                            </div>
+                                        `;
+                                    }).join('')}
+                                </div>
+                            `}
+                        </div>
+                    </div>
+
+                    <!-- Column 2: Oracle, Tags, Rulings, Legalities & Database Attributes -->
+                    <div class="space-y-4 max-h-[85vh] overflow-y-auto custom-scrollbar pr-2 pb-10">
+                        
+                        <!-- Oracle & Flavor Text -->
+                        ${card.oracle_text || scryfall.oracle_text || mtgjson.text ? `
+                            <div class="bg-slate-950 p-2.5 rounded border border-slate-800 space-y-1.5">
+                                <span class="text-[9px] font-bold uppercase tracking-widest text-slate-400 block">Oracle Text</span>
+                                <div class="text-[10px] text-slate-200 leading-relaxed font-sans">${getVal(card.oracle_text, scryfall.oracle_text, mtgjson.text).replace(/\n/g, '<br>')}</div>
+                                ${getVal(card.flavor_text, scryfall.flavor_text, mtgjson.flavorText) ? `<div class="text-[9px] text-slate-400 italic pt-1.5 border-t border-slate-900">${getVal(card.flavor_text, scryfall.flavor_text, mtgjson.flavorText)}</div>` : ''}
+                            </div>
+                        ` : ''}
+
+                        <!-- Tags (Aggregated) -->
+                        ${uniqueTags.length > 0 ? `
+                            <div>
+                                <span class="text-[9px] font-bold uppercase tracking-widest text-slate-400 block mb-1">Tags (${uniqueTags.length})</span>
+                                <div class="flex flex-wrap gap-1">
+                                    ${uniqueTags.map(t => `<span class="text-[9px] bg-slate-950 text-cyan-300 px-1.5 py-0.5 rounded border border-slate-800 font-mono" title="${t.source}">${t.val}</span>`).join('')}
+                                </div>
+                            </div>
+                        ` : ''}
+
+                        <!-- Rulings -->
+                        ${uniqueRulings.length > 0 ? `
+                            <div>
+                                <span class="text-[9px] font-bold uppercase tracking-widest text-slate-400 block mb-1">Rulings (${uniqueRulings.length})</span>
+                                <div class="space-y-1">
+                                    ${uniqueRulings.map(r => `
+                                        <div class="text-[9px] text-slate-300 bg-slate-950 p-1.5 rounded border border-slate-800 leading-normal">
+                                            <span class="text-cyan-500 font-mono text-[8px] mr-1">${r.date || 'Unknown Date'}:</span>${r.comment}
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        ` : ''}
+
+                        <!-- Legalities -->
+                        ${legalities.length > 0 ? `
+                            <div>
+                                <span class="text-[9px] font-bold uppercase tracking-widest text-slate-400 block mb-1">Legalities</span>
+                                <div class="grid grid-cols-3 gap-1 p-1 bg-slate-950 rounded border border-slate-800">
+                                    ${legalities.map(l => {
+                                        const isLegal = l.status === 'legal';
+                                        const isBanned = l.status === 'banned';
+                                        const color = isLegal ? 'text-emerald-400 border-emerald-950 bg-emerald-950/20' : isBanned ? 'text-rose-400 border-rose-950 bg-rose-950/20' : 'text-slate-500 border-slate-900 bg-slate-900/40';
+                                        return `
+                                            <div class="px-1 py-0.5 rounded border text-[8px] flex justify-between items-center ${color}">
+                                                <span class="capitalize truncate">${l.format}</span>
+                                                <span class="font-mono uppercase text-[7px] font-bold ml-1">${isLegal ? 'L' : isBanned ? 'B' : 'N'}</span>
+                                            </div>
+                                        `;
+                                    }).join('')}
+                                </div>
+                            </div>
+                        ` : ''}
+
+                        <!-- Procedural Database Schema Properties (Catch-All) -->
+                        <div>
+                            <span class="text-[9px] font-bold uppercase tracking-widest text-slate-400 block mb-1">Database Attributes</span>
+                            <div class="bg-slate-950 p-1 rounded border border-slate-800">
+                                ${proceduralHTML || '<span class="text-[9px] text-slate-500 p-1">No additional attributes.</span>'}
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            `;
+        }
+    </script>
+</body>
+</html>
