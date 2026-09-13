@@ -3238,29 +3238,6 @@ const IMAGE_TYPES = ['small', 'normal', 'large', 'png', 'art_crop', 'border_crop
 const DFC_LAYOUTS = new Set(['transform', 'modal_dfc', 'double_faced_token', 'reversible_card']);
 function isDoubleFacedLayout(layout) { return DFC_LAYOUTS.has(layout); }
 
-/**
- * Single shared "generic card back" image, served for the `face=back`
- * request on any card whose layout isn't genuinely double-faced. Generated
- * once (a plain SVG, so there's no dependency on a real Scryfall asset URL
- * that might not exist or might change), cached to disk, and reused for
- * every single-faced card — there is never a per-card network fetch for
- * this, since a non-double-faced card's "back" is always the same generic
- * image by definition.
- */
-const GENERIC_CARD_BACK_PATH = path.join(IMG_CACHE_DIR, '_generic_card_back.svg');
-function ensureGenericCardBack() {
-    if (fsSync.existsSync(GENERIC_CARD_BACK_PATH)) return;
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="488" height="680" viewBox="0 0 488 680">
-        <rect width="488" height="680" rx="24" fill="#1a1a2e"/>
-        <rect x="14" y="14" width="460" height="652" rx="18" fill="#0f0f1a" stroke="#c9a86a" stroke-width="4"/>
-        <circle cx="244" cy="340" r="150" fill="none" stroke="#c9a86a" stroke-width="6"/>
-        <circle cx="244" cy="340" r="110" fill="none" stroke="#c9a86a" stroke-width="3"/>
-        <text x="244" y="354" font-family="Georgia, serif" font-size="44" fill="#c9a86a" text-anchor="middle" font-weight="bold">MTG</text>
-        <text x="244" y="640" font-family="Georgia, serif" font-size="15" fill="#6a6a7a" text-anchor="middle">No back face — single-faced card</text>
-    </svg>`;
-    try { fsSync.writeFileSync(GENERIC_CARD_BACK_PATH, svg); } catch (e) { vLog('CACHE_ERR', `Failed to write generic card back placeholder: ${e.message}`); }
-}
-
 async function fetchAndCacheImage(id, type, face = 'front', priority = 'urgent') {
     const relPath = `${id}_${type}_${face}.jpg`;
     const fullPath = path.join(IMG_CACHE_DIR, relPath);
@@ -4027,20 +4004,8 @@ app.get('/cache/:scryfallId/:type.jpg', async (req, res) => {
     vLog('CACHE', `Image cache MISS for ${id} (${type}/${face}). Fetching from Scryfall CDN (urgent priority)...`);
     const result = await fetchAndCacheImage(id, type, face, 'urgent');
     if (!result.ok) {
-        // A requested 'back' face is never allowed to dead-end in a JSON
-        // error: whether this card is genuinely single-faced (Scryfall has
-        // no back art to give us — a normal, permanent 404) or the fetch
-        // merely failed transiently, the frontend's flip button should
-        // always have *something* to show. Serve the shared generic card
-        // back placeholder in either case. This is intentionally NOT
-        // written into image_cache — it's not a real cached asset for this
-        // card, just a stand-in — so a genuinely double-faced card that hit
-        // a transient failure will still be retried for real on next request.
-        if (face === 'back') {
-            ensureGenericCardBack();
-            vLog('CACHE', `No real back face available for ${id} (${result.status === 404 ? '404 — likely single-faced' : `error: ${result.error || result.status}`}). Serving generic card back placeholder.`);
-            return res.sendFile(GENERIC_CARD_BACK_PATH);
-        }
+        // A requested 'back' face on a single-faced card is a legitimate
+        // 404, not a system fault — everything else still gets a real error.
         return res.status(result.status || 500).json({ success: false, error: result.error || 'Image not found on Scryfall.' });
     }
     queueImagePreload(id); // now that this card has been touched, top up the rest in the background
@@ -4172,7 +4137,6 @@ app.get(/.*/, (req, res) => {
 async function start() {
     vLog('SYSTEM', 'Starting MTG Oracle Daemon v4.0 (Bedrock) initialization sequence...');
     await ensureDirectories();
-    ensureGenericCardBack();
     initDatabase();
 
     if (stats.cardCount === 0) {
