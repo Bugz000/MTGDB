@@ -1,4 +1,4 @@
-# MTG Oracle Daemon v4.0 — "Bedrock" Edition
+# MTGDB
 
 > **A single-file, self-healing, self-sustaining Magic: The Gathering card database, price-history cache, and image proxy.** Designed to be run once and forgotten: `node server.js` populates itself, keeps itself in sync, and repairs itself indefinitely across crashes, power outages, corrupt downloads, or partial writes.
 
@@ -64,8 +64,8 @@ The daemon aggregates and cross-references data from four primary canonical sour
 ### Installation & Execution
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/mtg-oracle-daemon.git
-cd mtg-oracle-daemon
+git clone https://github.com/Bugz000/MTGDB.git
+cd MTGDB
 
 # Install dependencies
 npm install
