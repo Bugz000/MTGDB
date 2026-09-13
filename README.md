@@ -16,6 +16,15 @@ Managing local Magic: The Gathering data historically requires brittle scripts, 
 
 ---
 
+## 📺 Demo
+
+[![MTGDB Demo Preview](https://i.postimg.cc/wjtmT7Yb/demo.png)](https://youtu.be/Hc5C4GahXds)
+
+> 🎥 **[Watch the full video walkthrough on YouTube](https://youtu.be/Hc5C4GahXds)**
+
+
+---
+
 ## 📦 Data Sources
 
 The daemon aggregates and cross-references data from four primary canonical sources:
