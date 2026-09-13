@@ -112,7 +112,7 @@ npm install
 
 # Run the daemon (launches supervisor, TUI, and Express server on port 3000)
 node server.js
-# wait aprx 15 minutes for data population, but it should come up pretty quickly after that
+# wait aprx 15 minutes for first-run data population, but it should come up pretty quickly after that
 # Enjoy
 ```
 
