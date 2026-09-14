@@ -10,6 +10,202 @@
         ::-webkit-scrollbar-track { background: #020617; }
         ::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
         ::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+        /* ================= Flip Card: real 3D thickness + light sheen ================= */
+        /* The card is built as an actual thin box in 3D space (front/back faces + four
+           thin edge faces), not a flat sprite with a fake shadow. `container-type: size`
+           lets the edge faces reference the outer element's real rendered width/height
+           (via cqw/cqh) so the box geometry stays correct at any card size. */
+        .flip-card-outer {
+            perspective: 1400px;
+            container-type: size;
+            container-name: flipcard;
+        }
+
+        .flip-card-inner {
+            position: absolute;
+            inset: 0;
+            transform-style: preserve-3d;
+            transition: transform 0.7s cubic-bezier(0.4, 0.15, 0.15, 1);
+        }
+
+        /* Card thickness = 8px total (4px either side of the center plane). */
+        .card-face {
+            position: absolute;
+            inset: 0;
+            border-radius: 0.25rem;
+            overflow: hidden;
+            background: #0f172a;
+            border: 1px solid #334155;
+            backface-visibility: hidden;
+            box-shadow: 0 14px 30px -10px rgba(0, 0, 0, 0.65);
+        }
+        .card-face-front { transform: translateZ(4px); }
+        .card-face-back  { transform: rotateY(180deg) translateZ(4px); }
+
+        /* The four thin sides of the box. Each starts as an 8px-thick strip centered on
+           the box, then rotates out to the corresponding face using translateZ(half the
+           box's real width/height) - the standard CSS "cube face" recipe, just adapted
+           to a thin card instead of an equal-sided cube. */
+        .card-edge {
+            position: absolute;
+            backface-visibility: hidden;
+            background: linear-gradient(90deg, #0b1220 0%, #334155 40%, #64748b 50%, #334155 60%, #0b1220 100%);
+        }
+        .card-edge-right,
+        .card-edge-left {
+            top: 0;
+            left: calc(50% - 4px);
+            width: 8px;
+            height: 100%;
+        }
+        .card-edge-right { transform: rotateY(90deg) translateZ(calc(50cqw)); }
+        .card-edge-left  { transform: rotateY(-90deg) translateZ(calc(50cqw)); }
+
+        .card-edge-top,
+        .card-edge-bottom {
+            top: calc(50% - 4px);
+            left: 0;
+            width: 100%;
+            height: 8px;
+            background: linear-gradient(180deg, #0b1220 0%, #334155 40%, #64748b 50%, #334155 60%, #0b1220 100%);
+        }
+        .card-edge-top    { transform: rotateX(-90deg) translateZ(calc(50cqh)); }
+        .card-edge-bottom { transform: rotateX(90deg) translateZ(calc(50cqh)); }
+
+        /* Faint always-on diagonal highlight, like the card is under a soft sleeve. */
+        .card-idle-sheen {
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(120deg, transparent 35%, rgba(255,255,255,0.07) 48%, transparent 60%);
+            pointer-events: none;
+            z-index: 2;
+        }
+
+        /* Gloss sweep that plays across both faces while the card is mid-flip, as if it
+           caught a passing window's light. Triggered by JS adding .is-flipping briefly. */
+        .card-gloss {
+            position: absolute;
+            inset: -25%;
+            background: linear-gradient(115deg, transparent 30%, rgba(255,255,255,0.55) 48%, rgba(255,255,255,0.14) 52%, transparent 68%);
+            transform: translateX(-140%) rotate(6deg);
+            opacity: 0;
+            mix-blend-mode: overlay;
+            pointer-events: none;
+            z-index: 3;
+        }
+        .flip-card-inner.is-flipping .card-gloss {
+            animation: card-gloss-sweep 0.7s ease-in-out;
+        }
+        @keyframes card-gloss-sweep {
+            0%   { transform: translateX(-140%) rotate(6deg); opacity: 0; }
+            30%  { opacity: 0.9; }
+            50%  { transform: translateX(0%) rotate(6deg); opacity: 1; }
+            70%  { opacity: 0.9; }
+            100% { transform: translateX(140%) rotate(6deg); opacity: 0; }
+        }
+
+        /* ================= Foil shimmer ================= */
+        .foil-shimmer {
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            mix-blend-mode: color-dodge;
+            opacity: 0.5;
+            background-size: 250% 250%;
+            z-index: 3;
+        }
+        .foil-badge {
+            position: absolute;
+            top: 4px;
+            left: 4px;
+            font-size: 7px;
+            font-weight: 800;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            padding: 1px 4px;
+            border-radius: 3px;
+            background: linear-gradient(115deg, #ff5fa2, #ffd45f, #5fd4ff, #a15fff);
+            background-size: 200% 200%;
+            color: #0b1120;
+            animation: foil-classic-sweep 3.2s linear infinite;
+            z-index: 4;
+            pointer-events: none;
+        }
+
+        /* Classic modern foil: broad rainbow diagonal sweep. Used as the default/fallback
+           for any foil finish we don't have a dedicated look for yet (see the TODO next to
+           getFoilVariantClass() further down in the page's script). */
+        .foil-classic {
+            background-image: linear-gradient(115deg, #ff5fa2 0%, #ffd45f 16%, #7dff8f 33%, #5fd4ff 50%, #a15fff 66%, #ff5fa2 83%, #ffd45f 100%);
+            animation: foil-classic-sweep 3.2s linear infinite;
+        }
+        @keyframes foil-classic-sweep {
+            0% { background-position: 0% 50%; }
+            100% { background-position: 200% 50%; }
+        }
+
+        /* Rainbow foil: fuller-saturation banded holographic spectrum. */
+        .foil-rainbowfoil {
+            background-image: repeating-linear-gradient(100deg,
+                #ff003c 0 8%, #ff9a00 8% 16%, #f6ff00 16% 24%, #22ff6a 24% 32%,
+                #00d9ff 32% 40%, #6a5cff 40% 48%, #ff00d4 48% 56%);
+            background-size: 220% 220%;
+            opacity: 0.6;
+            animation: foil-classic-sweep 2.4s linear infinite;
+        }
+
+        /* Surge foil: sharper, faster, more angular glints (modern "electric" finish). */
+        .foil-surgefoil {
+            background-image: repeating-linear-gradient(65deg,
+                rgba(255,255,255,0) 0 4%, rgba(120,220,255,0.75) 4% 6%, rgba(255,255,255,0) 6% 12%);
+            background-size: 180% 180%;
+            opacity: 0.55;
+            mix-blend-mode: screen;
+            animation: foil-surge-sweep 1.1s linear infinite;
+        }
+        @keyframes foil-surge-sweep {
+            0% { background-position: 0% 0%; }
+            100% { background-position: -140% 60%; }
+        }
+
+        /* Galaxy foil: speckled starfield drifting across a deep-space gradient. */
+        .foil-galaxyfoil {
+            background-image:
+                radial-gradient(circle at 20% 30%, rgba(255,255,255,0.9) 0 1px, transparent 2px),
+                radial-gradient(circle at 70% 60%, rgba(255,255,255,0.7) 0 1px, transparent 2px),
+                radial-gradient(circle at 40% 80%, rgba(255,255,255,0.8) 0 1px, transparent 2px),
+                linear-gradient(120deg, #2b0a4a, #0a2a4a 30%, #4a0a3a 60%, #0a1a4a 100%);
+            background-size: 60px 60px, 50px 50px, 70px 70px, 220% 220%;
+            opacity: 0.55;
+            animation: foil-classic-sweep 6s linear infinite;
+        }
+
+        /* Ripple foil: horizontal bands that slowly undulate, like light on water. */
+        .foil-ripplefoil {
+            background-image: repeating-linear-gradient(0deg,
+                rgba(255,255,255,0) 0px, rgba(140,210,255,0.6) 3px, rgba(255,255,255,0) 7px);
+            background-size: 100% 14px;
+            opacity: 0.45;
+            mix-blend-mode: screen;
+            animation: foil-ripple-wave 2.6s ease-in-out infinite;
+        }
+        @keyframes foil-ripple-wave {
+            0%, 100% { background-position: 0 0; }
+            50% { background-position: 0 14px; }
+        }
+
+        /* Halo foil: soft radiant glow that breathes from the center. */
+        .foil-halofoil {
+            background-image: radial-gradient(circle at 50% 45%, rgba(255,255,255,0.9), rgba(255,210,255,0.4) 35%, transparent 65%);
+            opacity: 0.55;
+            mix-blend-mode: overlay;
+            animation: foil-halo-pulse 2.8s ease-in-out infinite;
+        }
+        @keyframes foil-halo-pulse {
+            0%, 100% { transform: scale(0.9); opacity: 0.35; }
+            50% { transform: scale(1.15); opacity: 0.65; }
+        }
     </style>
 </head>
 <body class="bg-slate-950 text-slate-100 h-screen font-sans antialiased flex flex-col overflow-hidden">
@@ -167,6 +363,47 @@
             const flipped = inner.dataset.flipped === 'true';
             inner.style.transform = flipped ? 'rotateY(0deg)' : 'rotateY(180deg)';
             inner.dataset.flipped = flipped ? 'false' : 'true';
+
+            // Restart the gloss-sweep animation every time the card is flipped (even
+            // mid-animation on a fast double-click), so the "light catching the card"
+            // glint always plays alongside the real 3D rotation.
+            inner.classList.remove('is-flipping');
+            void inner.offsetWidth; // force reflow so the animation restarts
+            inner.classList.add('is-flipping');
+            clearTimeout(inner._flipAnimTimer);
+            inner._flipAnimTimer = setTimeout(() => {
+                inner.classList.remove('is-flipping');
+            }, 720);
+        }
+
+        // Maps Scryfall `promo_types` values to a dedicated foil CSS look that
+        // approximates the real-world finish. Anything not listed here (and any
+        // foil card in the search grid, where we don't have promo_types available
+        // per-row) falls back to 'foil-classic'.
+        //
+        // TODO: give these their own distinct foil treatments instead of falling
+        // back to the classic rainbow sweep: oilslick, neonink, confettifoil,
+        // doublerainbow, raisedfoil, textured, silverfoil, gilded, embossed,
+        // manafoil, invisibleink, stepandcompleatfoil, imperialoilslick,
+        // doubleexposure.
+        // TODO: the search-result grid only has `card.foil` (a boolean) to go on -
+        // per-card promo_types would need a join against card_tags (or a denormalized
+        // column) in /api/search, which we've avoided for list-query performance.
+        // Once available, thread the same variant classes into the grid cards below.
+        const FOIL_VARIANT_MAP = {
+            surgefoil: 'foil-surgefoil',
+            rainbowfoil: 'foil-rainbowfoil',
+            galaxyfoil: 'foil-galaxyfoil',
+            ripplefoil: 'foil-ripplefoil',
+            halofoil: 'foil-halofoil',
+        };
+        function getFoilVariantClass(promoTypes) {
+            if (Array.isArray(promoTypes)) {
+                for (const pt of promoTypes) {
+                    if (FOIL_VARIANT_MAP[pt]) return FOIL_VARIANT_MAP[pt];
+                }
+            }
+            return 'foil-classic';
         }
 
         function buildFullQueryString() {
@@ -266,10 +503,16 @@
                         ? `<span class="font-mono font-bold text-[10px] text-emerald-400">${currencyUnit}${numPrice.toFixed(2)}${currencySuffix}</span>`
                         : `<span class="font-mono font-bold text-[10px] text-slate-600">--</span>`;
 
+                    // See TODO above getFoilVariantClass(): grid rows only carry the
+                    // boolean `foil` flag (plus a foil-price fallback), not promo_types,
+                    // so every foil result here uses the classic rainbow sweep.
+                    const isFoil = !!card.foil || (card.price_usd_foil != null && !isNaN(parseFloat(card.price_usd_foil)) && parseFloat(card.price_usd_foil) > 0);
+
                     return `
                     <div id="card-card-${card.scryfall_id}" onclick="loadCardDetails('${card.scryfall_id}', true)" class="bg-slate-950 border border-slate-800 hover:border-cyan-500 cursor-pointer rounded overflow-hidden transition-colors group flex flex-col shadow-sm">
                         <div class="aspect-[5/7] bg-slate-900 relative">
                             <img src="/cache/${card.scryfall_id}/small.jpg" alt="${card.name}" class="w-full h-full object-cover group-hover:brightness-110 transition-all" loading="lazy" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\'><rect width=\'100\' height=\'100\' fill=\'%230f172a\'/><text x=\'50%\' y=\'50%\' fill=\'%23475569\' font-size=\'10\' dominant-baseline=\'middle\' text-anchor=\'middle\' font-family=\'sans-serif\'>No Art</text></svg>'">
+                            ${isFoil ? `<div class="foil-shimmer foil-classic"></div><span class="foil-badge">Foil</span>` : ''}
                         </div>
                         <div class="p-2 flex flex-col justify-between flex-1 gap-1">
                             <div>
@@ -444,6 +687,10 @@
             const prices = scryfall.prices || {};
             const priceUsd = getVal(prices.usd, card.price_usd);
             const priceUsdFoil = getVal(prices.usd_foil, card.price_usd_foil);
+            const finishes = Array.isArray(scryfall.finishes) ? scryfall.finishes : (Array.isArray(mtgjson.finishes) ? mtgjson.finishes : null);
+            const isFoil = finishes ? (finishes.includes('foil') || finishes.includes('etched')) : !!(card.foil) || (priceUsdFoil != null && !isNaN(parseFloat(priceUsdFoil)) && parseFloat(priceUsdFoil) > 0);
+            const promoTypes = scryfall.promo_types || mtgjson.promoTypes || [];
+            const foilVariantClass = getFoilVariantClass(promoTypes);
             const priceEur = getVal(prices.eur, card.price_eur);
             const priceEurFoil = getVal(prices.eur_foil, card.price_eur_foil);
             const priceTix = getVal(prices.tix, card.price_tix);
@@ -583,12 +830,25 @@
 
                         <!-- Image Block -->
                         <div class="bg-slate-950 p-2 rounded border border-slate-800 space-y-2">
-                            <div class="w-full aspect-[5/7] rounded relative" style="perspective:1200px;">
-                                <div id="flip-card-inner" data-flipped="false" class="relative w-full h-full" style="transform-style:preserve-3d; transition:transform 0.6s cubic-bezier(0.4,0.2,0.2,1);">
-                                    <img src="${imgSrc}" alt="${card.name}" class="absolute inset-0 w-full h-full object-cover rounded border border-slate-700 shadow-lg bg-slate-900" style="backface-visibility:hidden;" onerror="this.onerror=null; this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\'><rect width=\'100\' height=\'100\' fill=\'%230f172a\'/><text x=\'50%\' y=\'50%\' fill=\'%23475569\' font-size=\'10\' dominant-baseline=\'middle\' text-anchor=\'middle\' font-family=\'sans-serif\'>No Art</text></svg>'">
-                                    <img src="/cache/${card.scryfall_id}/normal.jpg?face=back" alt="${card.name} (back)" class="absolute inset-0 w-full h-full object-cover rounded border border-slate-700 shadow-lg bg-slate-900" style="backface-visibility:hidden; transform:rotateY(180deg);" onerror="this.onerror=null; this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\'><rect width=\'100\' height=\'100\' fill=\'%230f172a\'/><text x=\'50%\' y=\'50%\' fill=\'%23475569\' font-size=\'10\' dominant-baseline=\'middle\' text-anchor=\'middle\' font-family=\'sans-serif\'>No Art</text></svg>'">
+                            <div id="flip-card-outer" class="flip-card-outer w-full aspect-[5/7] relative">
+                                <div id="flip-card-inner" data-flipped="false" class="flip-card-inner">
+                                    <div class="card-face card-face-front">
+                                        <img src="${imgSrc}" alt="${card.name}" class="absolute inset-0 w-full h-full object-cover" onerror="this.onerror=null; this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\'><rect width=\'100\' height=\'100\' fill=\'%230f172a\'/><text x=\'50%\' y=\'50%\' fill=\'%23475569\' font-size=\'10\' dominant-baseline=\'middle\' text-anchor=\'middle\' font-family=\'sans-serif\'>No Art</text></svg>'">
+                                        <div class="card-idle-sheen"></div>
+                                        <div class="card-gloss"></div>
+                                        ${isFoil ? `<div class="foil-shimmer ${foilVariantClass}"></div><span class="foil-badge">Foil</span>` : ''}
+                                    </div>
+                                    <div class="card-face card-face-back">
+                                        <img src="/cache/${card.scryfall_id}/normal.jpg?face=back" alt="${card.name} (back)" class="absolute inset-0 w-full h-full object-cover" onerror="this.onerror=null; this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\'><rect width=\'100\' height=\'100\' fill=\'%230f172a\'/><text x=\'50%\' y=\'50%\' fill=\'%23475569\' font-size=\'10\' dominant-baseline=\'middle\' text-anchor=\'middle\' font-family=\'sans-serif\'>No Art</text></svg>'">
+                                        <div class="card-idle-sheen"></div>
+                                        <div class="card-gloss"></div>
+                                    </div>
+                                    <div class="card-edge card-edge-right"></div>
+                                    <div class="card-edge card-edge-left"></div>
+                                    <div class="card-edge card-edge-top"></div>
+                                    <div class="card-edge card-edge-bottom"></div>
                                 </div>
-                                <button onclick="flipDetailCard()" title="Flip card" class="absolute bottom-2 right-2 flex items-center gap-1 bg-slate-950/85 hover:bg-slate-800 border border-slate-700 text-slate-300 text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded backdrop-blur transition-colors" style="z-index:5;">
+                                <button onclick="flipDetailCard()" title="Flip card" class="absolute bottom-2 right-2 flex items-center gap-1 bg-slate-950/85 hover:bg-slate-800 border border-slate-700 text-slate-300 text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded backdrop-blur transition-colors" style="z-index:10;">
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
                                     Flip
                                 </button>

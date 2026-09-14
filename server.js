@@ -4599,7 +4599,7 @@ app.get('/api/search', (req, res) => {
         const rows = db.prepare(`
             SELECT scryfall_id, oracle_id, illustration_id, name, set_code, set_name, collector_number, rarity, type_line,
                    mana_cost, cmc, colors, color_identity, power, toughness, loyalty, oracle_text,
-                   price_usd, price_usd_foil, price_eur, released_at, artist, layout, keywords
+                   price_usd, price_usd_foil, price_eur, released_at, artist, layout, keywords, foil
             FROM cards WHERE ${fullWhereSql} ORDER BY ${compiled.orderSql} LIMIT ? OFFSET ?
         `).all(...fullWhereParams, ...orderParams, SEARCH_PAGE_SIZE, offset);
 
