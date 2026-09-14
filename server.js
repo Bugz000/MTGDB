@@ -1,4 +1,3 @@
-
 /**
  * ============================================================================
  *  CHANGELOG / STATUS — read this first if picking up this file cold
@@ -11,6 +10,29 @@
  *  indefinitely without manual intervention.
  *
  *  MOST RECENT FIXES (confirmed via live user testing, newest first):
+ *  - [ADDED] Colorised live log endpoint: vLog() now also appends every
+ *    event to an in-memory ring buffer (recentLogEntries, capped at
+ *    LOG_BUFFER_MAX entries) tagged with the same {color-fg} bucket it
+ *    already computes for the TUI. `GET /api/log` returns that buffer as
+ *    JSON (supports ?since=<id> for incremental polling); `GET /log` is a
+ *    small self-contained HTML page that polls /api/log and renders it
+ *    dark-terminal-style with the exact same color-per-tag scheme as the
+ *    blessed TUI log panel, auto-scrolling to the latest line. Buffer is
+ *    in-memory only (bounded, resets on restart) — audit_log (Section 4)
+ *    remains the durable, restart-safe record; this is the "watch it live
+ *    without SSHing into the TUI" view.
+ *  - [ADDED] Generic single-faced card back is now a real photo instead of
+ *    a drawn SVG: ensureGenericCardBackPhoto() downloads Scryfall's own
+ *    canonical card-back art once (Scryfall ID
+ *    0aeebaf5-8c7d-4636-9e82-8c27447861f7 — the same ID Scryfall itself
+ *    puts in every non-double-faced card's card_back_id field), caches it
+ *    to disk, and every place that used to serve GENERIC_CARD_BACK_PATH
+ *    (the SVG) now serves the real photo whenever it downloaded
+ *    successfully. The hand-drawn SVG is kept as-is and still generated on
+ *    boot, but is now strictly the last-resort fallback (photo download
+ *    failed / not yet completed) rather than the default — see
+ *    ensureGenericCardBack() in Section 8 (image cache) for the fallback
+ *    chain.
  *  - [FIXED] Card flip was fade-swap-based and raced the image load,
  *    frequently showing no visible change ("just flashes"); replaced with
  *    a real two-face CSS 3D flip (see GIT PUSH SUMMARY above for detail).
@@ -127,6 +149,11 @@
  *    "generic function -> class when grouping is needed" preference — only
  *    partially applied (AsyncMutex, retryAsync, streamJsonlGz,
  *    pauseFlushResume are the generic pieces so far).
+ *  - [ ] /log viewer is intentionally basic (poll-based, in-memory only,
+ *    no tag/level filtering, no persistence across restarts). If it turns
+ *    out to matter, upgrade path is: swap polling for SSE/WebSocket push,
+ *    and/or back it with audit_log (already durable) instead of the
+ *    in-memory ring buffer for history that survives a restart.
  *
  *  If you are a different model/session picking this up: the code compiles
  *  (`node --check server.js` passes) and the search/parsing logic has been
@@ -912,6 +939,24 @@ function updateUI() {
     screen.render();
 }
 
+/**
+ * In-memory ring buffer backing `GET /api/log` and `GET /log` (see Section
+ * 17B, just below the route table). Deliberately separate from audit_log
+ * (Section 4, SQLite-backed): this is a live "tail -f the TUI" view, not a
+ * durable record — it resets on every restart and never touches disk. Each
+ * entry stores the SAME tagColor bucket vLog already computed for the
+ * blessed TUI, so the web view can be colorised identically without
+ * re-deriving anything or parsing blessed's {tag} markup back out.
+ */
+const LOG_BUFFER_MAX = 2000;
+let logSeq = 0;
+const recentLogEntries = [];
+function pushLogEntry(tag, msg, tagColor) {
+    logSeq++;
+    recentLogEntries.push({ id: logSeq, ts: Date.now(), tag, msg: String(msg), color: tagColor });
+    if (recentLogEntries.length > LOG_BUFFER_MAX) recentLogEntries.splice(0, recentLogEntries.length - LOG_BUFFER_MAX);
+}
+
 function vLog(tag, msg) {
     const time = new Date().toISOString().replace('T', ' ').substring(11, 19);
     let tagColor = 'cyan-fg';
@@ -927,6 +972,7 @@ function vLog(tag, msg) {
     if (process.env.MTG_HEADLESS === '1' || !process.stdout.isTTY) {
         console.log(`[${time}] [${tag}] ${msg}`);
     }
+    try { pushLogEntry(tag, msg, tagColor); } catch (e) { /* the web log view is best-effort, never the reason vLog itself throws */ }
 }
 
 function tLog(method, urlPath, status, durationMs) {
@@ -3532,17 +3578,31 @@ const DFC_LAYOUTS = new Set(['transform', 'modal_dfc', 'double_faced_token', 're
 function isDoubleFacedLayout(layout) { return DFC_LAYOUTS.has(layout); }
 
 /**
- * Single shared "generic card back" image, served for the `face=back`
- * request on any card whose layout isn't genuinely double-faced. Generated
- * once (a plain SVG, so there's no dependency on a real Scryfall asset URL
- * that might not exist or might change), cached to disk, and reused for
- * every single-faced card — there is never a per-card network fetch for
- * this, since a non-double-faced card's "back" is always the same generic
- * image by definition.
+ * Single shared "generic card back" asset, served for the `face=back`
+ * request on any card whose layout isn't genuinely double-faced — a
+ * non-double-faced card's "back" is always the same generic image by
+ * definition, so there's never a per-card network fetch for this.
+ *
+ * Two layers, tried in order by generic CardBackAsset():
+ *  1. GENERIC_CARD_BACK_PHOTO_PATH — a REAL photo of the standard Magic
+ *     card back, downloaded once from Scryfall itself using the Scryfall
+ *     ID 0aeebaf5-8c7d-4636-9e82-8c27447861f7. This is not a guess: it's
+ *     the exact ID Scryfall's own API puts in a card's `card_back_id`
+ *     field for every card that uses the standard back, so it resolves on
+ *     Scryfall's normal image CDN the same way any other card image ID
+ *     does. This is the one actually used in normal operation.
+ *  2. GENERIC_CARD_BACK_SVG_PATH — a hand-drawn placeholder, generated
+ *     locally with no network dependency at all. Pure last-resort fallback
+ *     for the (rare, and self-healing on next boot) case where the photo
+ *     hasn't downloaded successfully yet.
  */
-const GENERIC_CARD_BACK_PATH = path.join(IMG_CACHE_DIR, '_generic_card_back.svg');
+const GENERIC_CARD_BACK_ID = '0aeebaf5-8c7d-4636-9e82-8c27447861f7';
+const GENERIC_CARD_BACK_SVG_PATH = path.join(IMG_CACHE_DIR, '_generic_card_back.svg');
+const GENERIC_CARD_BACK_PHOTO_PATH = path.join(IMG_CACHE_DIR, '_generic_card_back_photo.jpg');
+let genericCardBackPhotoReady = false;
+
 function ensureGenericCardBack() {
-    if (fsSync.existsSync(GENERIC_CARD_BACK_PATH)) return;
+    if (fsSync.existsSync(GENERIC_CARD_BACK_SVG_PATH)) return;
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="488" height="680" viewBox="0 0 488 680">
         <rect width="488" height="680" rx="24" fill="#1a1a2e"/>
         <rect x="14" y="14" width="460" height="652" rx="18" fill="#0f0f1a" stroke="#c9a86a" stroke-width="4"/>
@@ -3551,7 +3611,57 @@ function ensureGenericCardBack() {
         <text x="244" y="354" font-family="Georgia, serif" font-size="44" fill="#c9a86a" text-anchor="middle" font-weight="bold">MTG</text>
         <text x="244" y="640" font-family="Georgia, serif" font-size="15" fill="#6a6a7a" text-anchor="middle">No back face — single-faced card</text>
     </svg>`;
-    try { fsSync.writeFileSync(GENERIC_CARD_BACK_PATH, svg); } catch (e) { vLog('CACHE_ERR', `Failed to write generic card back placeholder: ${e.message}`); }
+    try { fsSync.writeFileSync(GENERIC_CARD_BACK_SVG_PATH, svg); } catch (e) { vLog('CACHE_ERR', `Failed to write generic card back SVG fallback: ${e.message}`); }
+}
+
+/**
+ * Downloads the real generic card-back photo exactly once and caches it to
+ * disk, using the same CDN URL shape (SCRYFALL_IMG_BASE/type/face/d1/d2/id)
+ * as every other card image fetch in this file — the generic back ID is
+ * just treated as a normal image id with face='front'. Safe to call
+ * repeatedly: short-circuits instantly once the file exists. Runs through
+ * retryAsync (same backoff-retry helper used for every other startup
+ * download) but is NEVER awaited by boot — this is strictly best-effort and
+ * boot must not wait on it (see start(), which fires this and moves on).
+ */
+async function ensureGenericCardBackPhoto() {
+    if (fsSync.existsSync(GENERIC_CARD_BACK_PHOTO_PATH) && fsSync.statSync(GENERIC_CARD_BACK_PHOTO_PATH).size > 0) {
+        genericCardBackPhotoReady = true;
+        return true;
+    }
+    try {
+        await retryAsync(async () => {
+            const dir1 = GENERIC_CARD_BACK_ID.charAt(0);
+            const dir2 = GENERIC_CARD_BACK_ID.charAt(1);
+            const url = `${SCRYFALL_IMG_BASE}/normal/front/${dir1}/${dir2}/${GENERIC_CARD_BACK_ID}.jpg`;
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 30000);
+            let res;
+            try {
+                res = await fetch(url, { signal: controller.signal });
+            } finally {
+                clearTimeout(timeout);
+            }
+            if (!res.ok) throw new Error(`HTTP ${res.status} fetching generic card back photo`);
+            const tmpFile = GENERIC_CARD_BACK_PHOTO_PATH + '.part';
+            await pipeline(Readable.fromWeb(res.body), fsSync.createWriteStream(tmpFile));
+            const stat = await fs.stat(tmpFile);
+            if (stat.size === 0) { await fs.unlink(tmpFile).catch(() => {}); throw new Error('Downloaded generic card back photo was empty'); }
+            await fs.rename(tmpFile, GENERIC_CARD_BACK_PHOTO_PATH);
+        }, { retries: 3, baseDelayMs: 5000, label: 'generic-card-back-photo' });
+        genericCardBackPhotoReady = true;
+        vLog('CACHE', 'Generic card back photo cached — single-faced cards will now show the real card back on flip instead of the SVG placeholder.');
+        return true;
+    } catch (e) {
+        genericCardBackPhotoReady = false;
+        vLog('CACHE_ERR', `Could not download the real generic card back photo (${e.message}). Falling back to the SVG placeholder for now — will retry on next boot.`);
+        return false;
+    }
+}
+
+/** Whichever generic back asset is actually available right now — real photo if it downloaded, SVG otherwise. Callers should call ensureGenericCardBack() first so the SVG fallback is guaranteed to exist. */
+function genericCardBackAssetPath() {
+    return genericCardBackPhotoReady ? GENERIC_CARD_BACK_PHOTO_PATH : GENERIC_CARD_BACK_SVG_PATH;
 }
 
 /**
@@ -4368,7 +4478,7 @@ app.get('/cache/:scryfallId/:type.jpg', async (req, res) => {
         if (!cardLayout || !isDoubleFacedLayout(cardLayout.layout)) {
             ensureGenericCardBack();
             stats.cacheHits++;
-            return res.sendFile(GENERIC_CARD_BACK_PATH);
+            return res.sendFile(genericCardBackAssetPath());
         }
     }
 
@@ -4405,7 +4515,7 @@ app.get('/cache/:scryfallId/:type.jpg', async (req, res) => {
         if (face === 'back') {
             ensureGenericCardBack();
             vLog('CACHE', `No real back face available for ${id} (${result.status === 404 ? '404 — likely single-faced' : `error: ${result.error || result.status}`}). Serving generic card back placeholder.`);
-            return res.sendFile(GENERIC_CARD_BACK_PATH);
+            return res.sendFile(genericCardBackAssetPath());
         }
         return res.status(result.status || 500).json({ success: false, error: result.error || 'Image not found on Scryfall.' });
     }
@@ -4524,6 +4634,120 @@ app.get('/api/cards/:scryfallId', (req, res) => {
     }
 });
 
+// ============================================================================
+// SECTION 17B: LIVE COLORISED LOG (web view of the TUI's log panel)
+// ============================================================================
+// JSON feed backing the /log page. `since` lets a poller ask for only what's
+// new since its last successful poll (by entry id, not timestamp — ids are a
+// strictly increasing sequence, so this is race-free even across restarts of
+// the polling client). Without `since`, returns the most recent LOG_BUFFER_MAX
+// entries (i.e. everything currently buffered).
+app.get('/api/log', (req, res) => {
+    const sinceRaw = req.query.since;
+    const since = sinceRaw !== undefined ? parseInt(sinceRaw, 10) : null;
+    const entries = (since !== null && !Number.isNaN(since))
+        ? recentLogEntries.filter((e) => e.id > since)
+        : recentLogEntries;
+    res.json({ success: true, data: entries, latest: logSeq });
+});
+
+// A small self-contained (no build step, no external assets) HTML page that
+// polls /api/log and renders it like a terminal — same color-per-tag scheme
+// vLog already uses for the blessed TUI (grey timestamp, bold colored tag,
+// plain message), dark background, monospace, auto-scrolls to the newest
+// line unless the user has scrolled up to read back through history.
+app.get('/log', (req, res) => {
+    res.type('html').send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MTG Oracle Daemon — Live Log</title>
+<style>
+    :root {
+        --grey-fg: #94a3b8; --red-fg: #f87171; --yellow-fg: #fbbf24;
+        --green-fg: #34d399; --cyan-fg: #22d3ee; --magenta-fg: #e879f9;
+    }
+    * { box-sizing: border-box; }
+    body {
+        margin: 0; background: #020617; color: #e2e8f0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12.5px; height: 100vh; display: flex; flex-direction: column;
+    }
+    header {
+        padding: 8px 12px; border-bottom: 1px solid #1e293b; display: flex;
+        align-items: center; justify-content: space-between; flex-shrink: 0;
+        background: rgba(2,6,23,0.9);
+    }
+    header h1 { font-size: 13px; margin: 0; color: var(--cyan-fg); letter-spacing: 0.05em; }
+    header .status { color: var(--grey-fg); font-size: 11px; }
+    header .status.live::before { content: '●'; color: var(--green-fg); margin-right: 5px; }
+    header .status.stalled::before { content: '●'; color: var(--red-fg); margin-right: 5px; }
+    #log { flex: 1; overflow-y: auto; padding: 10px 12px; white-space: pre-wrap; word-break: break-word; }
+    .line { line-height: 1.5; }
+    .ts { color: var(--grey-fg); }
+    .tag { font-weight: bold; }
+    .fg-red-fg { color: var(--red-fg); } .fg-yellow-fg { color: var(--yellow-fg); }
+    .fg-green-fg { color: var(--green-fg); } .fg-cyan-fg { color: var(--cyan-fg); }
+    .fg-magenta-fg { color: var(--magenta-fg); } .fg-grey-fg { color: var(--grey-fg); }
+    ::-webkit-scrollbar { width: 8px; } ::-webkit-scrollbar-track { background: #020617; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
+</style>
+</head>
+<body>
+    <header>
+        <h1>MTG ORACLE DAEMON — LIVE LOG</h1>
+        <span id="status" class="status live">connecting…</span>
+    </header>
+    <div id="log"></div>
+    <script>
+        const logEl = document.getElementById('log');
+        const statusEl = document.getElementById('status');
+        let since = null;
+        let stuckAtBottom = true;
+        logEl.addEventListener('scroll', () => {
+            stuckAtBottom = (logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight) < 40;
+        });
+        function esc(s) {
+            return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+        function fmtTime(ts) {
+            return new Date(ts).toISOString().substring(11, 19);
+        }
+        function render(entries) {
+            if (!entries.length) return;
+            const html = entries.map(e =>
+                '<div class="line"><span class="ts">[' + fmtTime(e.ts) + ']</span> ' +
+                '<span class="tag fg-' + e.color + '">[' + esc(e.tag) + ']</span> ' +
+                '<span class="msg">' + esc(e.msg) + '</span></div>'
+            ).join('');
+            logEl.insertAdjacentHTML('beforeend', html);
+            const MAX_DOM_LINES = 4000;
+            while (logEl.children.length > MAX_DOM_LINES) logEl.removeChild(logEl.firstChild);
+            if (stuckAtBottom) logEl.scrollTop = logEl.scrollHeight;
+        }
+        async function poll() {
+            try {
+                const url = since === null ? '/api/log' : '/api/log?since=' + since;
+                const res = await fetch(url);
+                const body = await res.json();
+                if (body.success) {
+                    render(body.data);
+                    since = body.latest;
+                    statusEl.textContent = 'live';
+                    statusEl.className = 'status live';
+                }
+            } catch (e) {
+                statusEl.textContent = 'reconnecting…';
+                statusEl.className = 'status stalled';
+            }
+        }
+        poll();
+        setInterval(poll, 1500);
+    </script>
+</body>
+</html>`);
+});
+
 app.get(/.*/, (req, res) => {
     const indexPath = path.join(PUBLIC_DIR, 'index.html');
     if (!fsSync.existsSync(indexPath)) {
@@ -4539,7 +4763,8 @@ app.get(/.*/, (req, res) => {
 async function start() {
     vLog('SYSTEM', 'Starting MTG Oracle Daemon v4.0 (Bedrock) initialization sequence...');
     await ensureDirectories();
-    ensureGenericCardBack();
+    ensureGenericCardBack(); // synchronous, no network — the always-available fallback exists before anything else can run
+    ensureGenericCardBackPhoto().catch((e) => vLog('CACHE_ERR', `Generic card back photo bootstrap failed unexpectedly: ${e.message}`)); // fire-and-forget: never block boot on a network fetch
     initDatabase();
 
     if (stats.cardCount === 0) {
