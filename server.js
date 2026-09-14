@@ -423,6 +423,17 @@ const TMP_DIR = path.join(CACHE_DIR, 'tmp');
 const BACKUP_DIR = path.join(ROOT_DIR, 'backup');
 const BACKUP_MTGJSON_DIR = path.join(BACKUP_DIR, 'MTGJSON');
 const BACKUP_MANAPOOL_DIR = path.join(BACKUP_DIR, 'ManaPool');
+// The single most irreplaceable file this whole project produces: an
+// append-only, ever-growing ledger of every genuinely NEW ManaPool sale
+// ever ingested, independent of the SQLite database entirely. ManaPool's
+// API only ever exposes a rolling recent-sales window per card — once a
+// sale rolls off that window it can never be re-fetched from anywhere,
+// so the database is the only record of it, and this ledger exists purely
+// so a catastrophic database loss doesn't also mean losing sales history
+// that cannot be recovered by re-downloading anything. One line of JSON
+// per sale, appended as it's inserted — see appendToManapoolLedger() and
+// restoreManapoolFromLedger().
+const MANAPOOL_LEDGER_PATH = path.join(BACKUP_MANAPOOL_DIR, 'all_sales_ledger.jsonl');
 const BACKUP_SCRYFALL_DIR = path.join(BACKUP_DIR, 'Scryfall');
 const BACKUP_SNAPSHOT_DIR = path.join(BACKUP_DIR, 'snapshots');
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
@@ -1527,6 +1538,67 @@ function setSyncState(key, value) {
     }
 }
 
+/**
+ * STATS PERSISTENCE — addresses the documented "reboot forgets everything"
+ * gap: sync timestamps, cumulative counters (total requests served,
+ * image cache hits/misses, snapshots/rollbacks/heals/enrichment counts)
+ * used to live purely in the in-memory `stats` object and reset to zero on
+ * every restart even though nothing about the underlying history actually
+ * changed. Two mechanisms:
+ *   1. The three "last synced" timestamps were ALREADY being written to
+ *      sync_state on every successful sync (mtgjson_last_sync etc.) but
+ *      were never read back into `stats` at boot — trivial fix, loadStatsSnapshot()
+ *      does it directly from those existing keys.
+ *   2. Everything else (counters that increment continuously rather than
+ *      being set once per sync) is persisted as one JSON blob under a
+ *      single sync_state key, written periodically (not on every single
+ *      increment — that would mean a DB write per HTTP request, which is
+ *      not a trade worth making) and once more on graceful shutdown.
+ * rps/peakRps/status2xx/4xx/5xx/requestRing are deliberately NOT persisted
+ * — those describe live traffic right now, not history, and resetting them
+ * on restart is correct, not a bug.
+ */
+const STATS_SNAPSHOT_KEY = 'stats_snapshot_v1';
+const STATS_PERSIST_FIELDS = [
+    'totalRequests', 'cacheHits', 'cacheMisses',
+    'snapshotsTaken', 'rollbacksPerformed', 'healActionsTaken',
+    'patchedFromBackup', 'cardsEnrichedThisSession',
+    'lastAuditAt', 'lastAuditStatus',
+];
+function persistStatsSnapshot() {
+    if (!db) return;
+    try {
+        const snapshot = {};
+        for (const key of STATS_PERSIST_FIELDS) snapshot[key] = stats[key];
+        setSyncState(STATS_SNAPSHOT_KEY, JSON.stringify(snapshot));
+    } catch (e) {
+        vLog('STATS_PERSIST_ERR', `Failed to persist stats snapshot: ${e.message}`);
+    }
+}
+function loadStatsSnapshot() {
+    try {
+        const mtgjsonLast = getSyncState('mtgjson_last_sync');
+        if (mtgjsonLast) stats.lastMtgjsonSyncAt = parseInt(mtgjsonLast, 10);
+        const manapoolLast = getSyncState('manapool_last_sync');
+        if (manapoolLast) stats.lastManapoolSyncAt = parseInt(manapoolLast, 10);
+        const scryfallLast = getSyncState('scryfall_bulk_last_sync');
+        if (scryfallLast) stats.lastScryfallSyncAt = parseInt(scryfallLast, 10);
+
+        const raw = getSyncState(STATS_SNAPSHOT_KEY);
+        if (raw) {
+            const snapshot = JSON.parse(raw);
+            for (const key of STATS_PERSIST_FIELDS) {
+                if (snapshot[key] !== undefined && snapshot[key] !== null) stats[key] = snapshot[key];
+            }
+            vLog('BOOT', `Restored persisted stats from a previous run: ${stats.totalRequests.toLocaleString()} lifetime requests, ${stats.cacheHits.toLocaleString()} cache hits, last audit ${stats.lastAuditStatus || 'unknown'}.`);
+        } else {
+            vLog('BOOT', 'No persisted stats snapshot found (first run, or an older database predating this feature) — cumulative counters start fresh.');
+        }
+    } catch (e) {
+        vLog('STATS_PERSIST_ERR', `Failed to restore stats snapshot (starting fresh): ${e.message}`);
+    }
+}
+
 // ============================================================================
 // SECTION 7: SNAPSHOTS, MUTEX-GUARDED MUTATIONS, CASCADING RESTORE
 // ============================================================================
@@ -2497,6 +2569,23 @@ async function rehydrateFromBackups() {
 
     stats.patchedFromBackup += totalPatched;
     if (totalPatched > 0) auditLog('INFO', 'REHYDRATE_SUCCESS', `Rehydration complete. Patched ${totalPatched} missing card(s) from local backups.`);
+
+    // Last-resort ManaPool recovery: only attempted when the live table
+    // looks genuinely empty (not on every boot — the ledger can grow large
+    // over months of operation, so this is deliberately not a routine
+    // check). This is the one dataset that can never be re-fetched once
+    // lost, so if the DB lost it, the ledger is the only way back.
+    try {
+        const liveSalesCount = db.prepare('SELECT COUNT(*) AS cnt FROM manapool_sales').get().cnt;
+        if (liveSalesCount === 0 && fsSync.existsSync(MANAPOOL_LEDGER_PATH)) {
+            vLog('REHYDRATE', 'manapool_sales table is empty but a sales ledger exists locally — restoring from it (no network needed)...');
+            const ledgerResult = await withTimeout(restoreManapoolFromLedger(), BOOT_REHYDRATE_TIMEOUT_MS, 'rehydrate-manapool-ledger');
+            if (ledgerResult.restored > 0) {
+                auditLog('INFO', 'LEDGER_RESTORE_SUCCESS', `Restored ${ledgerResult.restored} sale(s) from the permanent ManaPool ledger.`);
+            }
+        }
+    } catch (e) { vLog('REHYDRATE_ERR', `ManaPool ledger restore failed/timed out: ${e.message}`); }
+
     updateCounts();
     return totalPatched;
 }
@@ -2837,6 +2926,65 @@ function countManapoolEntries(filePath) {
     });
 }
 
+/**
+ * Appends newly-inserted sale rows to the permanent JSONL ledger
+ * (MANAPOOL_LEDGER_PATH). Fire-and-forget from the ingest pipeline's
+ * perspective (never awaited inline with the batch transaction, so a slow
+ * disk can't stall ingestion) but each call is itself awaited internally
+ * so appends from concurrent batches don't interleave/corrupt each other —
+ * see the serialization note on `ledgerWriteChain` below.
+ */
+let ledgerWriteChain = Promise.resolve();
+function appendToManapoolLedger(rows) {
+    if (!rows || rows.length === 0) return;
+    const lines = rows.map((r) => { try { return JSON.stringify(r); } catch (e) { return null; } }).filter(Boolean).join('\n') + '\n';
+    // Chain onto the previous write so concurrent batch flushes (which can
+    // legitimately overlap slightly around a pauseFlushResume boundary)
+    // never race each other's fs.appendFile calls.
+    ledgerWriteChain = ledgerWriteChain
+        .then(() => fs.appendFile(MANAPOOL_LEDGER_PATH, lines))
+        .catch((e) => vLog('LEDGER_ERR', `Failed to append ${rows.length} row(s) to the ManaPool sales ledger: ${e.message}`));
+    return ledgerWriteChain;
+}
+
+/**
+ * Disaster-recovery path: rebuilds manapool_sales entirely from the
+ * ledger, which is the ONE copy of this data that doesn't depend on the
+ * SQLite file at all. Safe to run against a partially-populated table —
+ * every row uses the same `ON CONFLICT(id) DO NOTHING` as normal ingest,
+ * so this is purely additive. Wired into rehydrateFromBackups() as a
+ * last-resort source when the live table looks emptier than the ledger.
+ */
+function restoreManapoolFromLedger() {
+    return new Promise((resolve) => {
+        if (!fsSync.existsSync(MANAPOOL_LEDGER_PATH)) { resolve({ restored: 0, malformed: 0 }); return; }
+        const insertSaleStmt = db.prepare(`
+            INSERT INTO manapool_sales (id, scryfall_id, date, price, condition, foil, language, quantity, raw_data, source_date, ingested_at)
+            VALUES (@id, @scryfall_id, @date, @price, @condition, @foil, @language, @quantity, @raw_data, @source_date, @ingested_at)
+            ON CONFLICT(id) DO NOTHING
+        `);
+        let batch = [];
+        let restored = 0, malformed = 0;
+        const processBatch = db.transaction((rows) => { for (const r of rows) { const c = insertSaleStmt.run(r); if (c.changes > 0) restored++; } });
+
+        const rl = readline.createInterface({ input: fsSync.createReadStream(MANAPOOL_LEDGER_PATH), crlfDelay: Infinity });
+        rl.on('line', (line) => {
+            const trimmed = line.trim();
+            if (!trimmed) return;
+            try {
+                batch.push(JSON.parse(trimmed));
+                if (batch.length >= MANAPOOL_BATCH_SIZE) { const b = batch; batch = []; processBatch(b); }
+            } catch (e) { malformed++; }
+        });
+        rl.on('close', () => {
+            try { if (batch.length > 0) processBatch(batch); } catch (e) { /* keep whatever succeeded */ }
+            vLog('LEDGER', `Restore from ledger complete: ${restored} row(s) restored, ${malformed} malformed line(s) skipped.`);
+            resolve({ restored, malformed });
+        });
+        rl.on('error', () => resolve({ restored, malformed }));
+    });
+}
+
 function ingestManapoolFile(singlesPath, sourceDate) {
     return withSnapshotGuard('manapool_ingest', () => new Promise((resolve, reject) => {
         const insertSaleStmt = db.prepare(`
@@ -2855,11 +3003,12 @@ function ingestManapoolFile(singlesPath, sourceDate) {
 
         const processBatch = db.transaction((entries) => {
             let added = 0;
+            const newlyInserted = [];
             for (const entry of entries) {
                 const changes = insertSaleStmt.run(entry);
-                if (changes.changes > 0) added++; else dupesSkipped++;
+                if (changes.changes > 0) { added++; newlyInserted.push(entry); } else dupesSkipped++;
             }
-            return added;
+            return { added, newlyInserted };
         });
 
         vLog('STREAM_INIT', `Opening read stream for ManaPool singles catalog: ${singlesPath}`);
@@ -2894,10 +3043,13 @@ function ingestManapoolFile(singlesPath, sourceDate) {
                     // in-flight HTTP requests get a real chance to run
                     // instead of the whole process appearing to freeze for
                     // however long the full file takes to ingest.
+                    let flushResult;
                     pauseFlushResume(readStream, () => {
-                        newSalesAdded += processBatch(toProcess);
+                        flushResult = processBatch(toProcess);
+                        newSalesAdded += flushResult.added;
                         updateCounts();
                     });
+                    appendToManapoolLedger(flushResult.newlyInserted);
                 }
             } catch (err) {
                 recordErrors++;
@@ -2906,7 +3058,14 @@ function ingestManapoolFile(singlesPath, sourceDate) {
         });
 
         jsonStream.on('end', () => {
-            try { if (batch.length > 0) newSalesAdded += processBatch(batch); updateCounts(); } catch (err) { return safeReject(err); }
+            try {
+                if (batch.length > 0) {
+                    const finalResult = processBatch(batch);
+                    newSalesAdded += finalResult.added;
+                    appendToManapoolLedger(finalResult.newlyInserted);
+                }
+                updateCounts();
+            } catch (err) { return safeReject(err); }
             vLog('MANAPOOL_PARSE', `Ingestion complete. Scanned ${cardsScanned}, added ${newSalesAdded}, dupes ${dupesSkipped}, malformed ${recordErrors}.`);
             safeResolve({ cardsScanned, newSalesAdded, dupesSkipped, recordErrors });
         });
@@ -4793,44 +4952,60 @@ async function start() {
     vLog('SYSTEM', 'Starting MTG Oracle Daemon v4.0 (Bedrock) initialization sequence...');
     await ensureDirectories();
     ensureGenericCardBack(); // synchronous, no network — the always-available fallback exists before anything else can run
-    ensureGenericCardBackPhoto().catch((e) => vLog('CACHE_ERR', `Generic card back photo bootstrap failed unexpectedly: ${e.message}`)); // fire-and-forget: never block boot on a network fetch
     initDatabase();
+    loadStatsSnapshot(); // restore lifetime counters/timestamps before anything (TUI, API) can display them
 
-    if (stats.cardCount === 0) {
-        vLog('BOOT', 'Card table looks empty on boot. Checking for local backup archives to rehydrate from (bounded by a timeout so this can never hang boot indefinitely)...');
-        try {
-            await withTimeout(rehydrateFromBackups(), BOOT_REHYDRATE_TIMEOUT_MS, 'boot-rehydrate');
-        } catch (e) {
-            vLog('BOOT_WARN', `Boot-time rehydration did not complete cleanly (${e.message}) — normal sync pipelines will populate the database instead.`);
-        }
-        updateCounts();
-    }
-
+    // REGRESSION FIX (this exact bug was fixed once already — a prior edit
+    // to this file put `await rehydrateFromBackups()` and other slow work
+    // back in front of app.listen(), which is precisely what caused a
+    // previously-reported ~15 minute delay before the web UI/API became
+    // reachable at all. Restoring the fix: the webserver boots FIRST, full
+    // stop, and every genuinely slow step (rehydration, the generic-back
+    // photo fetch, self-audit, all sync pipelines) runs afterward in a
+    // fire-and-forget background chain that can never block or interfere
+    // with it. Every route already has a `!db` guard for the brief window
+    // before the DB connection exists, so this is always safe.
     app.listen(PORT, () => {
-        vLog('SYSTEM', `Express HTTP Server listening on port ${PORT}`);
+        vLog('SYSTEM', `Express HTTP Server listening on port ${PORT} — boot-critical path complete, UI is live.`);
     });
-
-    setInterval(() => { runSelfAudit().catch((e) => vLog('AUDIT_ERR', e.message)); }, SELF_HEAL_INTERVAL_MS);
-
-    // Fire-and-forget: initial syncs run concurrently with each other (their
-    // downloads are bandwidth-bound, not lock-bound) and each hands off into
-    // its own permanent periodic worker loop once its first pass completes.
-    checkMtgJsonSync()
-        .then(() => { vLog('SYSTEM', 'Initial MTGJSON check complete.'); startMtgJsonWorker(); })
-        .catch((e) => { vLog('MTGJSON_ERR', `Initial sync failed: ${e.message}`); startMtgJsonWorker(); });
-
-    runScryfallBulkSync()
-        .then(() => { vLog('SYSTEM', 'Initial Scryfall bulk check complete.'); startScryfallWorker(); })
-        .catch((e) => { vLog('SCRYFALL_ERR', `Initial sync failed: ${e.message}`); startScryfallWorker(); });
-
-    startManapoolWorker().catch((e) => vLog('MANAPOOL_ERR', `Worker crashed: ${e.message}`));
-    runEnrichmentTrickleWorker().catch((e) => vLog('ENRICH_ERR', `Trickle worker crashed: ${e.message}`));
-    startDiskAuditWorker().catch((e) => vLog('DISK_AUDIT_ERR', `Worker crashed: ${e.message}`));
-
-    vLog('SYSTEM', 'Daemon fully initialized. All subsystems running.');
     sendToSupervisor({ type: 'ready' });
-	
-    runSelfAudit();
+
+    (async () => {
+        ensureGenericCardBackPhoto().catch((e) => vLog('CACHE_ERR', `Generic card back photo bootstrap failed unexpectedly: ${e.message}`));
+
+        if (stats.cardCount === 0) {
+            vLog('BOOT', 'Card table looks empty. Rehydrating from local backup archives in the background (bounded by a timeout so this can never hang anything)...');
+            try {
+                await withTimeout(rehydrateFromBackups(), BOOT_REHYDRATE_TIMEOUT_MS, 'boot-rehydrate');
+            } catch (e) {
+                vLog('BOOT_WARN', `Background rehydration did not complete cleanly (${e.message}) — normal sync pipelines will populate the database instead.`);
+            }
+            updateCounts();
+        }
+
+        await runSelfAudit();
+        setInterval(() => { runSelfAudit().catch((e) => vLog('AUDIT_ERR', e.message)); }, SELF_HEAL_INTERVAL_MS);
+
+        // Persist cumulative stats periodically so a crash/restart loses at
+        // most this interval's worth of counting, not the whole history.
+        setInterval(persistStatsSnapshot, STATS_PERSIST_INTERVAL_MS);
+
+        checkMtgJsonSync()
+            .then(() => { vLog('SYSTEM', 'Initial MTGJSON check complete.'); startMtgJsonWorker(); })
+            .catch((e) => { vLog('MTGJSON_ERR', `Initial sync failed: ${e.message}`); startMtgJsonWorker(); });
+
+        runScryfallBulkSync()
+            .then(() => { vLog('SYSTEM', 'Initial Scryfall bulk check complete.'); startScryfallWorker(); })
+            .catch((e) => { vLog('SCRYFALL_ERR', `Initial sync failed: ${e.message}`); startScryfallWorker(); });
+
+        startManapoolWorker().catch((e) => vLog('MANAPOOL_ERR', `Worker crashed: ${e.message}`));
+        runEnrichmentTrickleWorker().catch((e) => vLog('ENRICH_ERR', `Trickle worker crashed: ${e.message}`));
+        startDiskAuditWorker().catch((e) => vLog('DISK_AUDIT_ERR', `Worker crashed: ${e.message}`));
+
+        vLog('SYSTEM', 'All background subsystems (rehydration, audit, MTGJSON/ManaPool/Scryfall sync, enrichment, disk audit) now running.');
+    })().catch((err) => {
+        auditLog('ERROR', 'BOOT_BACKGROUND_ERR', `Background bootstrap chain hit an unexpected error: ${err.message}`);
+    });
 }
 
 function gracefulShutdown(reason, intentional) {
