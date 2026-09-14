@@ -10,6 +10,23 @@
  *  indefinitely without manual intervention.
  *
  *  MOST RECENT FIXES (confirmed via live user testing, newest first):
+ *  - [FIXED, CONFIRMED BROKEN VIA LIVE TESTING] The "real card back photo"
+ *    feature below shipped with a genuinely broken URL: it built an image
+ *    request from a card's `card_back_id` (0aeebaf5-8c7d-4636-9e82-8c27447861f7)
+ *    using the same SCRYFALL_IMG_BASE/type/face/d1/d2/id.jpg path used for
+ *    real card images. That ID identifies the *back design*, not a
+ *    fetchable image on Scryfall's per-card CDN — every request 404'd, so
+ *    every single-faced card silently kept showing the SVG placeholder
+ *    (confirmed live: user checked Sol Ring's own Card Back ID and it
+ *    matched, but the flip still showed the SVG). Replaced with
+ *    GENERIC_CARD_BACK_PHOTO_URLS, a short list of actual direct image
+ *    URLs (Scryfall's own documented "no back face" fallback asset first,
+ *    a known photo mirror as backup), tried in order until one downloads —
+ *    see ensureGenericCardBackPhoto() in Section 8. None of these were
+ *    fetch-verified from inside this sandbox (network tooling here has its
+ *    own bot-detection separate from this server's own runtime fetch), so
+ *    if the symptom recurs, check vLog's CACHE_ERR output at boot — it now
+ *    logs every URL tried and why each one failed.
  *  - [ADDED] Colorised live log endpoint: vLog() now also appends every
  *    event to an in-memory ring buffer (recentLogEntries, capped at
  *    LOG_BUFFER_MAX entries) tagged with the same {color-fg} bucket it
@@ -22,17 +39,16 @@
  *    remains the durable, restart-safe record; this is the "watch it live
  *    without SSHing into the TUI" view.
  *  - [ADDED] Generic single-faced card back is now a real photo instead of
- *    a drawn SVG: ensureGenericCardBackPhoto() downloads Scryfall's own
- *    canonical card-back art once (Scryfall ID
- *    0aeebaf5-8c7d-4636-9e82-8c27447861f7 — the same ID Scryfall itself
- *    puts in every non-double-faced card's card_back_id field), caches it
- *    to disk, and every place that used to serve GENERIC_CARD_BACK_PATH
- *    (the SVG) now serves the real photo whenever it downloaded
- *    successfully. The hand-drawn SVG is kept as-is and still generated on
- *    boot, but is now strictly the last-resort fallback (photo download
- *    failed / not yet completed) rather than the default — see
- *    ensureGenericCardBack() in Section 8 (image cache) for the fallback
- *    chain.
+ *    a drawn SVG: ensureGenericCardBackPhoto() downloads a real photo of
+ *    the standard Magic card back once (see GENERIC_CARD_BACK_PHOTO_URLS —
+ *    and the fix entry directly above for why this isn't Scryfall-ID-based
+ *    anymore), caches it to disk, and every place that used to serve
+ *    GENERIC_CARD_BACK_PATH (the SVG) now serves the real photo whenever
+ *    it downloaded successfully. The hand-drawn SVG is kept as-is and
+ *    still generated on boot, but is now strictly the last-resort fallback
+ *    (photo download failed / not yet completed) rather than the default —
+ *    see ensureGenericCardBack() in Section 8 (image cache) for the
+ *    fallback chain.
  *  - [FIXED] Card flip was fade-swap-based and raced the image load,
  *    frequently showing no visible change ("just flashes"); replaced with
  *    a real two-face CSS 3D flip (see GIT PUSH SUMMARY above for detail).
@@ -3583,20 +3599,32 @@ function isDoubleFacedLayout(layout) { return DFC_LAYOUTS.has(layout); }
  * non-double-faced card's "back" is always the same generic image by
  * definition, so there's never a per-card network fetch for this.
  *
- * Two layers, tried in order by generic CardBackAsset():
+ * Two layers, tried in order by genericCardBackAssetPath():
  *  1. GENERIC_CARD_BACK_PHOTO_PATH — a REAL photo of the standard Magic
- *     card back, downloaded once from Scryfall itself using the Scryfall
- *     ID 0aeebaf5-8c7d-4636-9e82-8c27447861f7. This is not a guess: it's
- *     the exact ID Scryfall's own API puts in a card's `card_back_id`
- *     field for every card that uses the standard back, so it resolves on
- *     Scryfall's normal image CDN the same way any other card image ID
- *     does. This is the one actually used in normal operation.
+ *     card back, downloaded once (see ensureGenericCardBackPhoto()) from
+ *     one of a short list of known-good direct image URLs. This is the one
+ *     actually used in normal operation.
  *  2. GENERIC_CARD_BACK_SVG_PATH — a hand-drawn placeholder, generated
  *     locally with no network dependency at all. Pure last-resort fallback
- *     for the (rare, and self-healing on next boot) case where the photo
- *     hasn't downloaded successfully yet.
+ *     for the (rare, and self-healing on next boot) case where none of the
+ *     photo URLs could be reached.
+ *
+ * CORRECTION (read this if touching this code again): an earlier version
+ * of this tried to build a URL from a card's `card_back_id`
+ * (0aeebaf5-8c7d-4636-9e82-8c27447861f7) using the same
+ * SCRYFALL_IMG_BASE/type/face/d1/d2/id.jpg path used for real card images.
+ * That does NOT work — card_back_id identifies the *design*, not a
+ * fetchable image on Scryfall's per-card image CDN, so every request 404'd
+ * and it silently fell back to the SVG forever. GENERIC_CARD_BACK_PHOTO_URLS
+ * below lists actual direct image URLs instead (Scryfall's own documented
+ * "no back face" fallback asset, then a known real photo mirror as backup),
+ * tried in order until one downloads successfully.
  */
-const GENERIC_CARD_BACK_ID = '0aeebaf5-8c7d-4636-9e82-8c27447861f7';
+const GENERIC_CARD_BACK_PHOTO_URLS = [
+    ...(process.env.MTG_CARD_BACK_PHOTO_URL ? [process.env.MTG_CARD_BACK_PHOTO_URL] : []), // manual override — set this env var to a known-working direct image URL if the defaults below ever stop working
+    'https://cards.scryfall.io/back.png', // Scryfall's own documented fallback asset for cards with no back face (what their client libraries return for getBackImage() on a single-faced card)
+    'https://gamepedia.cursecdn.com/mtgsalvation_gamepedia/f/f8/Magic_card_back.jpg', // known-good mirror of the same art, used as backup in case the above ever moves/404s
+];
 const GENERIC_CARD_BACK_SVG_PATH = path.join(IMG_CACHE_DIR, '_generic_card_back.svg');
 const GENERIC_CARD_BACK_PHOTO_PATH = path.join(IMG_CACHE_DIR, '_generic_card_back_photo.jpg');
 let genericCardBackPhotoReady = false;
@@ -3616,47 +3644,48 @@ function ensureGenericCardBack() {
 
 /**
  * Downloads the real generic card-back photo exactly once and caches it to
- * disk, using the same CDN URL shape (SCRYFALL_IMG_BASE/type/face/d1/d2/id)
- * as every other card image fetch in this file — the generic back ID is
- * just treated as a normal image id with face='front'. Safe to call
- * repeatedly: short-circuits instantly once the file exists. Runs through
- * retryAsync (same backoff-retry helper used for every other startup
- * download) but is NEVER awaited by boot — this is strictly best-effort and
- * boot must not wait on it (see start(), which fires this and moves on).
+ * disk. Tries each URL in GENERIC_CARD_BACK_PHOTO_URLS in turn (one fetch
+ * attempt each, short timeout) rather than betting everything on a single
+ * URL — direct image links like these do occasionally move, and this way a
+ * single dead link doesn't strand every single-faced card on the SVG
+ * fallback. Safe to call repeatedly: short-circuits instantly once the file
+ * exists. NEVER awaited by boot (see start(), which fires this and moves
+ * on) — strictly best-effort, and failure just means the SVG fallback
+ * keeps being served until the next boot retries.
  */
 async function ensureGenericCardBackPhoto() {
     if (fsSync.existsSync(GENERIC_CARD_BACK_PHOTO_PATH) && fsSync.statSync(GENERIC_CARD_BACK_PHOTO_PATH).size > 0) {
         genericCardBackPhotoReady = true;
         return true;
     }
-    try {
-        await retryAsync(async () => {
-            const dir1 = GENERIC_CARD_BACK_ID.charAt(0);
-            const dir2 = GENERIC_CARD_BACK_ID.charAt(1);
-            const url = `${SCRYFALL_IMG_BASE}/normal/front/${dir1}/${dir2}/${GENERIC_CARD_BACK_ID}.jpg`;
+    const errors = [];
+    for (const url of GENERIC_CARD_BACK_PHOTO_URLS) {
+        const tmpFile = GENERIC_CARD_BACK_PHOTO_PATH + '.part';
+        try {
             const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 30000);
+            const timeout = setTimeout(() => controller.abort(), 20000);
             let res;
             try {
-                res = await fetch(url, { signal: controller.signal });
+                res = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': 'MTG-Oracle-Daemon/4.0' } });
             } finally {
                 clearTimeout(timeout);
             }
-            if (!res.ok) throw new Error(`HTTP ${res.status} fetching generic card back photo`);
-            const tmpFile = GENERIC_CARD_BACK_PHOTO_PATH + '.part';
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
             await pipeline(Readable.fromWeb(res.body), fsSync.createWriteStream(tmpFile));
             const stat = await fs.stat(tmpFile);
-            if (stat.size === 0) { await fs.unlink(tmpFile).catch(() => {}); throw new Error('Downloaded generic card back photo was empty'); }
+            if (stat.size === 0) throw new Error('downloaded file was empty');
             await fs.rename(tmpFile, GENERIC_CARD_BACK_PHOTO_PATH);
-        }, { retries: 3, baseDelayMs: 5000, label: 'generic-card-back-photo' });
-        genericCardBackPhotoReady = true;
-        vLog('CACHE', 'Generic card back photo cached — single-faced cards will now show the real card back on flip instead of the SVG placeholder.');
-        return true;
-    } catch (e) {
-        genericCardBackPhotoReady = false;
-        vLog('CACHE_ERR', `Could not download the real generic card back photo (${e.message}). Falling back to the SVG placeholder for now — will retry on next boot.`);
-        return false;
+            genericCardBackPhotoReady = true;
+            vLog('CACHE', `Generic card back photo cached from ${url} — single-faced cards will now show the real card back on flip instead of the SVG placeholder.`);
+            return true;
+        } catch (e) {
+            await fs.unlink(tmpFile).catch(() => {}); // never leave a stray .part file behind, whichever step failed
+            errors.push(`${url} (${e.message})`);
+        }
     }
+    genericCardBackPhotoReady = false;
+    vLog('CACHE_ERR', `Could not download the real generic card back photo from any candidate URL — ${errors.join('; ')}. Falling back to the SVG placeholder for now — will retry on next boot.`);
+    return false;
 }
 
 /** Whichever generic back asset is actually available right now — real photo if it downloaded, SVG otherwise. Callers should call ensureGenericCardBack() first so the SVG fallback is guaranteed to exist. */
