@@ -156,19 +156,11 @@
         }
 
         function flipDetailCard() {
-            const img = document.getElementById('detail-card-img');
-            if (!img) return;
-            const flipped = img.dataset.flipped === 'true';
-            // The backend always returns a real image for face=back — a
-            // generic shared "card back" placeholder for single-faced
-            // cards, or the real back face for double-faced ones — so this
-            // never needs special-casing here, just swap the src.
-            img.style.opacity = '0';
-            setTimeout(() => {
-                img.src = flipped ? img.dataset.frontSrc : img.dataset.backSrc;
-                img.dataset.flipped = flipped ? 'false' : 'true';
-                img.style.opacity = '1';
-            }, 150);
+            const inner = document.getElementById('flip-card-inner');
+            if (!inner) return;
+            const flipped = inner.dataset.flipped === 'true';
+            inner.style.transform = flipped ? 'rotateY(0deg)' : 'rotateY(180deg)';
+            inner.dataset.flipped = flipped ? 'false' : 'true';
         }
 
         function buildFullQueryString() {
@@ -585,9 +577,12 @@
 
                         <!-- Image Block -->
                         <div class="bg-slate-950 p-2 rounded border border-slate-800 space-y-2">
-                            <div class="w-full aspect-[5/7] bg-slate-900 rounded border border-slate-700 overflow-hidden shadow-lg relative">
-                                <img id="detail-card-img" src="${imgSrc}" data-front-src="${imgSrc}" data-back-src="/cache/${card.scryfall_id}/normal.jpg?face=back" data-flipped="false" alt="${card.name}" class="w-full h-full object-cover transition-opacity duration-150" onerror="this.onerror=null; this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\'><rect width=\'100\' height=\'100\' fill=\'%230f172a\'/><text x=\'50%\' y=\'50%\' fill=\'%23475569\' font-size=\'10\' dominant-baseline=\'middle\' text-anchor=\'middle\' font-family=\'sans-serif\'>No Art</text></svg>'">
-                                <button onclick="flipDetailCard()" title="Flip card" class="absolute bottom-2 right-2 flex items-center gap-1 bg-slate-950/85 hover:bg-slate-800 border border-slate-700 text-slate-300 text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded backdrop-blur transition-colors">
+                            <div class="w-full aspect-[5/7] rounded relative" style="perspective:1200px;">
+                                <div id="flip-card-inner" data-flipped="false" class="relative w-full h-full" style="transform-style:preserve-3d; transition:transform 0.6s cubic-bezier(0.4,0.2,0.2,1);">
+                                    <img src="${imgSrc}" alt="${card.name}" class="absolute inset-0 w-full h-full object-cover rounded border border-slate-700 shadow-lg bg-slate-900" style="backface-visibility:hidden;" onerror="this.onerror=null; this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\'><rect width=\'100\' height=\'100\' fill=\'%230f172a\'/><text x=\'50%\' y=\'50%\' fill=\'%23475569\' font-size=\'10\' dominant-baseline=\'middle\' text-anchor=\'middle\' font-family=\'sans-serif\'>No Art</text></svg>'">
+                                    <img src="/cache/${card.scryfall_id}/normal.jpg?face=back" alt="${card.name} (back)" class="absolute inset-0 w-full h-full object-cover rounded border border-slate-700 shadow-lg bg-slate-900" style="backface-visibility:hidden; transform:rotateY(180deg);" onerror="this.onerror=null; this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\'><rect width=\'100\' height=\'100\' fill=\'%230f172a\'/><text x=\'50%\' y=\'50%\' fill=\'%23475569\' font-size=\'10\' dominant-baseline=\'middle\' text-anchor=\'middle\' font-family=\'sans-serif\'>No Art</text></svg>'">
+                                </div>
+                                <button onclick="flipDetailCard()" title="Flip card" class="absolute bottom-2 right-2 flex items-center gap-1 bg-slate-950/85 hover:bg-slate-800 border border-slate-700 text-slate-300 text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded backdrop-blur transition-colors" style="z-index:5;">
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
                                     Flip
                                 </button>

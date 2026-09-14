@@ -27,13 +27,13 @@ though centralisation and collaboration into a single effort would be beneficial
 
 There is a TUI that shows some stats, a functional webUI akin to scryfalls own to serve primary as a data inspector and a quick lookup tool, and ofcourse, an API accessible over http get/post requests, 
 
-> UPCOMING features
+> **UPCOMING features**
 - full scryfall style searching (Extended beyond scryfall's own search)
 - per-field indexing, so you can either dump all card info, or target a VERY specific field for faster lookups, though it should be instant in all cases
 - user tables, so you can import manabox lists, scryfall lists, the rest, you can have a WANTED list, a HAVEs list, whatever you need, infinite decks, whole collection, whatever; the database will store it all 
 - further afield? TBD ~ ~ 
 
-i will let AI continue from here;
+---
 
 ## 🌟 Overview & Philosophy
 
@@ -44,6 +44,7 @@ Managing local Magic: The Gathering data historically requires brittle scripts, 
 - **Advanced Search API:** Full Scryfall query syntax support with custom SQLite scalar functions (`MANA_MATCH`), FTS5 prefix search, and smart relevance ranking.
 - **Interactive TUI Dashboard:** A real-time Blessed TUI tracking system stats, CPU load, active stream progress, and live HTTP request rates.
 - **Double-Faced Card & Image Caching:** Disk caching keyed by `(scryfall_id, type, face)` with background preloading for all sizes and faces.
+- **Optimized Storage Allocation:** Pre-configured to manage up to **40GB** of total local disk space, intelligently split between **80% cache** (for database and image caches) and **20% database backups** (for raw archives and hot snapshots).
 
 ---
 
@@ -52,7 +53,6 @@ Managing local Magic: The Gathering data historically requires brittle scripts, 
 [![MTGDB Demo Preview](https://i.postimg.cc/wjtmT7Yb/demo.png)](https://youtu.be/Hc5C4GahXds)
 
 > 🎥 **[Watch it in Action](https://youtu.be/Hc5C4GahXds)**
-
 
 ---
 
@@ -69,23 +69,23 @@ The daemon aggregates and cross-references data from four primary canonical sour
 ## 🛡️ Resilience Architecture
 
 ```
- ┌─────────────────────────────────────────────────────────┐
- │               SUPERVISOR PROCESS (PID 1)                │
- │    - Heartbeat Watchdog (60s timeout / Boot Grace)      │
- │    - Exponential Backoff Auto-Restart & IPC Monitor     │
- └────────────────────────────┬────────────────────────────┘
-                              │ forks
- ┌────────────────────────────▼────────────────────────────┐
- │                WORKER DAEMON (server.js)                │
- │  ┌──────────────────┐  ┌─────────────────────────────┐  │
- │  │ Express REST API │  │ Blessed TUI Live Dashboard  │  │
- │  └────────┬─────────┘  └──────────────┬──────────────┘  │
- │           │                           │                 │
- │           └─────────────┬─────────────┘                 │
- │                         ▼                               │
- │             AsyncMutex & Snapshot Guard                 │
- │           (WAL Mode SQLite + FTS5 Engine)               │
- └─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│               SUPERVISOR PROCESS (PID 1)                │
+│    - Heartbeat Watchdog (60s timeout / Boot Grace)      │
+│    - Exponential Backoff Auto-Restart & IPC Monitor     │
+└────────────────────────────┬────────────────────────────┘
+                             │ forks
+┌────────────────────────────▼────────────────────────────┐
+│                WORKER DAEMON (server.js)                │
+│  ┌──────────────────┐  ┌─────────────────────────────┐  │
+│  │ Express REST API │  │ Blessed TUI Live Dashboard  │  │
+│  └────────┬─────────┘  └──────────────┬──────────────┘  │
+│           │                           │                 │
+│           └─────────────┬─────────────┘                 │
+│                         ▼                               │
+│             AsyncMutex & Snapshot Guard                 │
+│           (WAL Mode SQLite + FTS5 Engine)               │
+└─────────────────────────────────────────────────────────┘
 ```
 
 1. **Supervisor / Worker Split:** The supervisor process monitors worker heartbeats every 10 seconds. If the worker freezes or crashes, it force-kills and restarts with backoff.
@@ -112,7 +112,7 @@ npm install
 
 # Run the daemon (launches supervisor, TUI, and Express server on port 3000)
 node server.js
-# wait aprx 15 minutes for first-run data population, but it should come up pretty quickly after that
+# Wait approx 15 minutes for first-run data population, but it should come up pretty quickly after that
 # Enjoy
 ```
 
@@ -151,10 +151,10 @@ When running in interactive mode, use the following keys in your terminal:
 
 ```
 ├── server.js               # Unified daemon (Supervisor, TUI, Express API, Ingest, DB)
-├── cache/                  # Runtime database and disk caches
+├── cache/                  # Runtime database and disk caches (80% allocation / 32GB)
 │   ├── cards.db            # SQLite database (WAL mode)
 │   └── images/             # Cached card art JPEGs
-├── backup/                 # Raw source archives and hot snapshots
+├── backup/                 # Raw source archives and hot snapshots (20% allocation / 8GB)
 │   ├── MTGJSON/
 │   ├── ManaPool/
 │   ├── Scryfall/

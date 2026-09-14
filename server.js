@@ -1,3 +1,4 @@
+
 /**
  * ============================================================================
  *  CHANGELOG / STATUS — read this first if picking up this file cold
@@ -9,7 +10,17 @@
  *  matching frontend. Must survive crashes/reboots/corrupt downloads
  *  indefinitely without manual intervention.
  *
- *  FIXED THIS ROUND (confirmed via live user testing, not just theory):
+ *  MOST RECENT FIXES (confirmed via live user testing, newest first):
+ *  - [FIXED] Card flip was fade-swap-based and raced the image load,
+ *    frequently showing no visible change ("just flashes"); replaced with
+ *    a real two-face CSS 3D flip (see GIT PUSH SUMMARY above for detail).
+ *    Also re-added the layout-based short-circuit so non-double-faced
+ *    cards' back face never hits the network — necessary now that both
+ *    faces load unconditionally on every card view, not just on click.
+ *  - [FIXED, CRITICAL] Boot took up to ~15 minutes before the web UI/API
+ *    was reachable at all — see full entry further down.
+ *
+ *  EARLIER FIXES (confirmed via live user testing, not just theory):
  *  - [FIXED] Scryfall bulk sync was 100% broken: used `download_uri` (field
  *    doesn't exist) instead of `jsonl_download_uri`, and assumed a plain
  *    JSON array instead of the real format (gzip'd JSONL). Rewrote as a
@@ -4338,6 +4349,27 @@ app.get('/cache/:scryfallId/:type.jpg', async (req, res) => {
     const ALLOWED_TYPES = new Set(['small', 'normal', 'large', 'png', 'art_crop', 'border_crop']);
     if (!ALLOWED_TYPES.has(type)) {
         return res.status(400).json({ success: false, error: `Invalid image type. Allowed: ${[...ALLOWED_TYPES].join(', ')}` });
+    }
+
+    // BUGFIX: now that the frontend's 3D flip card loads BOTH faces
+    // unconditionally on every card view (not just on a flip click), a
+    // back-face request happens for every single card shown — and the vast
+    // majority of cards are single-faced. Without this check, every one of
+    // those would hit Scryfall's CDN for a back image that will always
+    // 404, forever (the earlier "try then fall back" version never cached
+    // the negative result, so it re-attempted the doomed network call on
+    // literally every view of every single-faced card). Checking the DB's
+    // own `layout` column first — already local, already free — means a
+    // non-double-faced card's "back" never touches the network at all and
+    // always serves the one shared generic placeholder instantly.
+    if (face === 'back') {
+        let cardLayout = null;
+        try { cardLayout = db.prepare('SELECT layout FROM cards WHERE scryfall_id = ?').get(id); } catch (e) { /* fall through to generic on lookup failure too */ }
+        if (!cardLayout || !isDoubleFacedLayout(cardLayout.layout)) {
+            ensureGenericCardBack();
+            stats.cacheHits++;
+            return res.sendFile(GENERIC_CARD_BACK_PATH);
+        }
     }
 
     let cacheRow = null;
