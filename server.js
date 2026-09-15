@@ -1,5 +1,46 @@
 /**
  * ============================================================================
+ *  GIT PUSH SUMMARY (latest commit — write a real commit message from this)
+ * ============================================================================
+ *  feat(persistence): survive restarts with actual memory; permanent
+ *  ManaPool sales ledger independent of the database
+ *
+ *  - Stats permanence: lifetime counters (totalRequests, cacheHits/Misses,
+ *    snapshotsTaken, rollbacksPerformed, healActionsTaken, patchedFromBackup,
+ *    cardsEnrichedThisSession) and lastAuditAt/lastAuditStatus are now
+ *    persisted as one JSON blob in sync_state (STATS_SNAPSHOT_KEY), written
+ *    every 30s (STATS_PERSIST_INTERVAL_MS) plus on every shutdown path
+ *    (graceful SIGINT/SIGTERM AND the emergencyExit crash handler), and
+ *    restored at boot via loadStatsSnapshot() before the TUI/API ever
+ *    display anything. lastMtgjsonSyncAt/lastManapoolSyncAt/
+ *    lastScryfallSyncAt were ALREADY being written to sync_state on every
+ *    sync but never read back — one-line fix, same function. Deliberately
+ *    NOT persisted: rps/peakRps/status2xx/4xx/5xx/requestRing — those
+ *    describe live traffic right now, resetting them on restart is
+ *    correct, not a bug.
+ *  - Permanent ManaPool sales ledger: every genuinely NEW sale row
+ *    (ON CONFLICT(id) DO NOTHING actually inserted, not a dupe) is now also
+ *    appended as one line of JSON to backup/ManaPool/all_sales_ledger.jsonl
+ *    (appendToManapoolLedger), completely independent of the SQLite
+ *    database. This is the answer to "once a sale rolls off ManaPool's
+ *    window it's gone forever" — the DB was the only copy before this;
+ *    now there are two, and the second doesn't share a failure mode with
+ *    the first. restoreManapoolFromLedger() rebuilds manapool_sales
+ *    straight from the ledger (same conflict-safe insert, purely
+ *    additive) and is wired into rehydrateFromBackups() as a last-resort
+ *    path when the live table is found empty.
+ *  - Also caught and re-fixed a REGRESSION: an intermediate edit to this
+ *    file had put `await rehydrateFromBackups()` back in front of
+ *    app.listen() — the exact ~15-minute-boot bug fixed once already.
+ *    Restored: webserver binds first, everything else (rehydration, the
+ *    generic-back photo fetch, self-audit, all sync pipelines) runs
+ *    afterward in a background chain.
+ *  Files touched: server.js only.
+ * ============================================================================
+ */
+
+/**
+ * ============================================================================
  *  CHANGELOG / STATUS — read this first if picking up this file cold
  * ============================================================================
  *  ORIGINAL GOAL: a single-file, self-hosted, self-healing MTG card database
@@ -51,7 +92,7 @@
  *    fallback chain.
  *  - [FIXED] Card flip was fade-swap-based and raced the image load,
  *    frequently showing no visible change ("just flashes"); replaced with
- *    a real two-face CSS 3D flip
+ *    a real two-face CSS 3D flip (see GIT PUSH SUMMARY above for detail).
  *    Also re-added the layout-based short-circuit so non-double-faced
  *    cards' back face never hits the network — necessary now that both
  *    faces load unconditionally on every card view, not just on click.
@@ -102,7 +143,8 @@
  *    blip failures without waiting a full 24h for the next cycle.
  *
  *  STILL OUTSTANDING / NOT DONE (priority order set by the user):
- *  - [DONE] Stats permanence + permanent ManaPool sales ledger 
+ *  - [DONE] Stats permanence + permanent ManaPool sales ledger — see GIT
+ *    PUSH SUMMARY at the very top of this file for full detail.
  *  - [DONE] Disk space budget worker (Section 8B): total footprint capped
  *    at DISK_BUDGET_TOTAL_BYTES (env DISK_BUDGET_GB, default 8GB), split
  *    DISK_BUDGET_CACHE_PERCENT (env, default 40%) to the image cache and
