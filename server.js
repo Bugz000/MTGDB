@@ -51,7 +51,7 @@
  *    fallback chain.
  *  - [FIXED] Card flip was fade-swap-based and raced the image load,
  *    frequently showing no visible change ("just flashes"); replaced with
- *    a real two-face CSS 3D flip (see GIT PUSH SUMMARY above for detail).
+ *    a real two-face CSS 3D flip
  *    Also re-added the layout-based short-circuit so non-double-faced
  *    cards' back face never hits the network — necessary now that both
  *    faces load unconditionally on every card view, not just on click.
@@ -102,6 +102,7 @@
  *    blip failures without waiting a full 24h for the next cycle.
  *
  *  STILL OUTSTANDING / NOT DONE (priority order set by the user):
+ *  - [DONE] Stats permanence + permanent ManaPool sales ledger 
  *  - [DONE] Disk space budget worker (Section 8B): total footprint capped
  *    at DISK_BUDGET_TOTAL_BYTES (env DISK_BUDGET_GB, default 8GB), split
  *    DISK_BUDGET_CACHE_PERCENT (env, default 40%) to the image cache and
@@ -453,6 +454,7 @@ const MTGJSON_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const MANAPOOL_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const SCRYFALL_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const SELF_HEAL_INTERVAL_MS = 60 * 60 * 1000;
+const STATS_PERSIST_INTERVAL_MS = 30 * 1000;
 const ENRICHMENT_TRICKLE_INTERVAL_MS = 2500;       // one lazy Scryfall single-card fetch per tick, gently
 const HEARTBEAT_INTERVAL_MS = 10000;
 const SNAPSHOT_RETENTION_COUNT = 10;
@@ -5018,7 +5020,11 @@ function gracefulShutdown(reason, intentional) {
     if (hardExitTimer.unref) hardExitTimer.unref();
 
     try {
-        if (db) { db.pragma('wal_checkpoint(TRUNCATE)'); db.close(); }
+        if (db) {
+            persistStatsSnapshot(); // last chance to save the interval's worth of counting a clean stop would otherwise lose
+            db.pragma('wal_checkpoint(TRUNCATE)');
+            db.close();
+        }
     } catch (e) { /* best effort — we're exiting regardless */ }
     clearTimeout(hardExitTimer);
     process.exit(0);
@@ -5046,7 +5052,7 @@ function emergencyExit(reason, err) {
     try { updateUI(); } catch (e) { /* noop */ }
     try { auditLog('CRITICAL', 'SYSTEM_CRITICAL', `${reason}: ${err && err.stack ? err.stack : String(err)}`); } catch (e) { /* noop */ }
     console.error(`[CRITICAL] ${reason}:`, err);
-    try { if (db) { db.pragma('wal_checkpoint(PASSIVE)'); db.close(); } } catch (e) { /* best effort */ }
+    try { if (db) { persistStatsSnapshot(); db.pragma('wal_checkpoint(PASSIVE)'); db.close(); } } catch (e) { /* best effort */ }
     setTimeout(() => process.exit(1), 300);
 }
 process.on('uncaughtException', (err) => emergencyExit('Uncaught Exception', err));
